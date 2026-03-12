@@ -50,8 +50,8 @@
 
 ### 依赖
 
-- Go 1.21+
-- Windows 环境 (使用 walk GUI 库)
+- Go 1.24+
+- Windows 环境 (使用 windigo GUI 库)
 
 ### 编译
 
@@ -63,7 +63,7 @@ go mod download
 go build -o sslctlw.exe
 
 # 发布构建 (隐藏控制台窗口)
-go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
+go build -trimpath -ldflags="-s -w -H windowsgui" -o sslctlw.exe
 ```
 
 ### 生成 Windows 资源 (可选)
@@ -80,7 +80,7 @@ rsrc -manifest main.manifest -o rsrc.syso
 | 组件 | 技术 |
 |------|------|
 | 语言 | Go |
-| GUI | [walk](https://github.com/lxn/walk) |
+| GUI | [windigo](https://github.com/rodrigocfd/windigo) |
 | IIS 管理 | appcmd.exe |
 | 证书绑定 | netsh http |
 | 证书操作 | PowerShell |
@@ -90,11 +90,15 @@ rsrc -manifest main.manifest -o rsrc.syso
 
 ```
 sslctlw/
-├── main.go           # 入口
-├── ui/               # GUI 界面
+├── main.go           # 入口（GUI / -auto 双模式）
+├── ui/               # windigo GUI 界面
 ├── iis/              # IIS 操作 (appcmd/netsh)
-├── cert/             # 证书管理
-├── api/              # API 客户端
+├── cert/             # 证书管理（存储/安装/转换/CSR）
+├── api/              # Deploy API 客户端
+├── config/           # JSON 配置（DPAPI 加密）
+├── deploy/           # 自动部署逻辑
+├── upgrade/          # 在线升级（签名验证/链式升级）
+├── util/             # 工具函数
 ├── main.manifest     # Windows 清单
 └── rsrc.syso         # 嵌入资源
 ```

@@ -35,7 +35,7 @@ Write-Host "  Fingerprints: $(if ($fingerprints) { 'configured' } else { 'not se
 Write-Host "  Trusted Org: $(if ($trustedOrg) { $trustedOrg } else { 'not set' })"
 Write-Host "  Country: $trustedCountry"
 
-$cmd = "go build -ldflags=`"$ldflags`" -o sslctlw.exe"
+$cmd = "go build -trimpath -ldflags=`"$ldflags`" -o sslctlw.exe"
 Write-Host "`nExecuting: $cmd`n"
 
 Invoke-Expression $cmd

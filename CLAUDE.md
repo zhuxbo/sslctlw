@@ -13,17 +13,19 @@ IIS SSL 证书部署工具，Go + windigo，单文件 exe。
 ```
 ui/           # windigo GUI (mainwindow.go, dialogs.go, background.go)
 iis/          # appcmd + netsh 封装
-cert/         # 证书存储/安装/转换
+cert/         # 证书存储/安装/转换/CSR
 api/          # Deploy API 客户端
-config/       # JSON 配置
+config/       # JSON 配置（DPAPI 加密）
 deploy/       # 自动部署逻辑
+upgrade/      # 在线升级（签名验证/链式升级）
+util/         # 工具函数
 integration/  # 端到端集成测试
 ```
 
 ## 构建
 
 ```bash
-go build -ldflags="-s -w -H windowsgui" -o sslctlw.exe
+go build -trimpath -ldflags="-s -w -H windowsgui" -o sslctlw.exe
 ```
 
 ## 测试
