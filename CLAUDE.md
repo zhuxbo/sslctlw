@@ -19,13 +19,15 @@ config/       # JSON 配置（DPAPI 加密）
 deploy/       # 自动部署逻辑
 upgrade/      # 在线升级（签名验证/链式升级）
 util/         # 工具函数
+build/        # 构建/发布脚本
 integration/  # 端到端集成测试
 ```
 
 ## 构建
 
-```bash
-go build -trimpath -ldflags="-s -w -H windowsgui" -o sslctlw.exe
+```powershell
+.\build\build.ps1 -Version 1.0.0    # 发布构建（输出到 dist/）
+.\build\build.ps1 -Debug             # 开发构建（带控制台）
 ```
 
 ## 测试

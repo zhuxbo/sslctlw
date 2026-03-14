@@ -4,9 +4,9 @@
 # 将已签名的 EXE 部署到远程 release 服务器
 #
 # 用法:
-#   ./scripts/release.sh 1.0.0 --exe-path dist/sslctlw.exe
-#   ./scripts/release.sh 1.0.0 --exe-path dist/sslctlw.exe --server cn
-#   ./scripts/release.sh --test
+#   ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe
+#   ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe --server cn
+#   ./build/release.sh --test
 
 set -e
 
@@ -33,7 +33,7 @@ load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         log_error "配置文件不存在: $CONFIG_FILE"
         log_info "请复制 release.conf.example 并配置:"
-        log_info "  cp $SCRIPT_DIR/release.conf.example $SCRIPT_DIR/release.conf"
+        log_info "  cp $SCRIPT_DIR/release.conf.example $CONFIG_FILE"
         exit 1
     fi
 
@@ -234,9 +234,9 @@ show_help() {
   $0 --test
 
 两步发布流程:
-  1. .\\build.ps1 -Version 1.0.0              # 本地构建
+  1. .\\build\\build.ps1 -Version 1.0.0        # 本地构建
   2. 云端 EV 签名 dist/sslctlw.exe            # 人工签名
-  3. ./scripts/release.sh 1.0.0 --exe-path dist/sslctlw.exe  # 发布
+  3. ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe  # 发布
 EOF
 }
 

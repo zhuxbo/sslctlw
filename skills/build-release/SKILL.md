@@ -45,27 +45,34 @@ go build -ldflags="-X main.version=1.0.0"
 
 升级功能在编译时注入安全配置（防止运行时被篡改）。仅校验 EV 签名的组织名、国家代码和 CA。
 
-### 环境变量
+### 配置文件
 
-设置环境变量后，`build.ps1` 会自动注入：
+复制 `build/build.conf.example` 为 `build/build.conf` 并填写：
 
-| 环境变量 | 说明 | 示例 |
-|----------|------|------|
-| `UPGRADE_TRUSTED_ORG` | 可信组织名称（精确匹配） | `My Company Ltd` |
-| `UPGRADE_TRUSTED_COUNTRY` | 国家代码（默认 CN） | `CN` |
-
-```powershell
-# 设置环境变量后构建
-$env:UPGRADE_TRUSTED_ORG = "My Company Ltd"
-.\build.ps1 -Version "1.0.0"
+```bash
+cp build/build.conf.example build/build.conf
 ```
+
+| 配置项 | 说明 | 示例 |
+|--------|------|------|
+| `TRUSTED_ORG` | 可信组织名称（精确匹配） | `My Company Ltd` |
+| `TRUSTED_COUNTRY` | 国家代码（默认 CN） | `CN` |
+
+### 环境变量覆盖
+
+环境变量优先级高于 `build.conf`：
+
+| 环境变量 | 对应配置项 |
+|----------|------------|
+| `UPGRADE_TRUSTED_ORG` | `TRUSTED_ORG` |
+| `UPGRADE_TRUSTED_COUNTRY` | `TRUSTED_COUNTRY` |
 
 ### ldflags 变量对照
 
-| 环境变量 | ldflags 变量 |
-|----------|--------------|
-| `UPGRADE_TRUSTED_ORG` | `sslctlw/upgrade.buildTrustedOrg` |
-| `UPGRADE_TRUSTED_COUNTRY` | `sslctlw/upgrade.buildTrustedCountry` |
+| 配置项 | ldflags 变量 |
+|--------|--------------|
+| `TRUSTED_ORG` | `sslctlw/upgrade.buildTrustedOrg` |
+| `TRUSTED_COUNTRY` | `sslctlw/upgrade.buildTrustedCountry` |
 
 ## 升级验证机制
 
@@ -80,18 +87,18 @@ $env:UPGRADE_TRUSTED_ORG = "My Company Ltd"
 ## 两步发布流程
 
 ```
-1. .\build.ps1 -Version 1.0.0                                         # 本地构建（输出到 dist/）
+1. .\build\build.ps1 -Version 1.0.0                                   # 本地构建（输出到 dist/）
 2. 云端 EV 签名 dist/sslctlw.exe                                       # 人工签名
-3. ./scripts/release.sh 1.0.0 --exe-path dist/sslctlw.exe             # 发布到 release 服务器
+3. ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe               # 发布到 release 服务器
 ```
 
 ### 发布脚本
 
 | 脚本 | 说明 |
 |------|------|
-| `scripts/release.sh` | 远程发布脚本（验证签名 → SSH 上传 → 更新 releases.json） |
-| `scripts/release-common.sh` | 公共函数库（日志、版本、releases.json 生成） |
-| `scripts/release.conf.example` | 配置模板（服务器列表、SSH 认证） |
+| `build/release.sh` | 远程发布脚本（验证签名 → SSH 上传 → 更新 releases.json） |
+| `build/release-common.sh` | 公共函数库（日志、版本、releases.json 生成） |
+| `build/release.conf.example` | 配置模板（服务器列表、SSH 认证） |
 
 ### releases.json 格式
 
@@ -119,8 +126,8 @@ $env:UPGRADE_TRUSTED_ORG = "My Company Ltd"
 
 ## 发布清单
 
-1. 构建：`.\build.ps1 -Version X.Y.Z`
+1. 构建：`.\build\build.ps1 -Version X.Y.Z`
 2. EV 代码签名
-3. 发布：`./scripts/release.sh X.Y.Z --exe-path dist/sslctlw.exe`
+3. 发布：`./build/release.sh X.Y.Z --exe-path dist/sslctlw.exe`
 4. 验证：`curl <release-url>/releases.json | jq .`
 5. `git tag vX.Y.Z && git push --tags`
