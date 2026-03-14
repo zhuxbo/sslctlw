@@ -102,6 +102,12 @@ func DecryptToken(encrypted string) (string, error) {
 
 	output := make([]byte, outputBlob.cbData)
 	copy(output, unsafe.Slice(outputBlob.pbData, outputBlob.cbData))
+	result := string(output)
 
-	return string(output), nil
+	// 清零中间 byte slice，减少内存中明文残留
+	for i := range output {
+		output[i] = 0
+	}
+
+	return result, nil
 }

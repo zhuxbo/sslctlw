@@ -205,6 +205,13 @@ func (t *BackgroundTask) doCheck() {
 	}
 	defer t.endCheck()
 
+	// 防止底层调用链中的 panic 导致整个程序崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			t.updateStatus(TaskStatusFailed, fmt.Sprintf("内部错误: %v", r))
+		}
+	}()
+
 	t.updateStatus(TaskStatusRunning, "正在检测证书...")
 
 	cfg, err := config.Load()

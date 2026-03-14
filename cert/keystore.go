@@ -55,21 +55,12 @@ type OrderMeta struct {
 
 // OrderStore 本地订单存储
 type OrderStore struct {
-	BaseDir string // 默认 {程序目录}/data/orders/
+	BaseDir string // 默认 {程序目录}/sslctlw/orders/
 }
 
-// NewOrderStore 创建订单存储
+// NewOrderStore 创建订单存储（使用 config.GetDataDir() 保持路径一致）
 func NewOrderStore() *OrderStore {
-	exe, err := os.Executable()
-	if err != nil {
-		// fallback 到 %APPDATA%\sslctlw\data\orders
-		appData := os.Getenv("APPDATA")
-		if appData == "" {
-			appData = "."
-		}
-		return &OrderStore{BaseDir: filepath.Join(appData, "sslctlw", "data", "orders")}
-	}
-	baseDir := filepath.Join(filepath.Dir(exe), "data", "orders")
+	baseDir := filepath.Join(config.GetDataDir(), "orders")
 	return &OrderStore{BaseDir: baseDir}
 }
 

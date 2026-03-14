@@ -465,8 +465,8 @@ func TestLoad_PlainTokenRejected(t *testing.T) {
 	}()
 
 	cfg, err := Load()
-	if err == nil {
-		t.Fatal("Load() 应该拒绝明文 Token")
+	if err != nil {
+		t.Fatalf("Load() 不应返回错误, got %v", err)
 	}
 	if cfg == nil {
 		t.Fatal("Load() 应该返回配置对象")

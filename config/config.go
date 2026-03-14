@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -206,8 +207,8 @@ func Load() (*Config, error) {
 	}
 
 	if cfg.Token != "" {
-		cfg.Token = "" // 明文 Token 已禁用，清理后提示用户重新配置
-		return &cfg, fmt.Errorf("检测到明文 Token，已被禁用，请在界面重新配置")
+		cfg.Token = "" // 明文 Token 已禁用，清理掉
+		log.Println("警告: 检测到明文 Token，已被禁用，请在界面重新配置")
 	}
 
 	return &cfg, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -416,7 +417,8 @@ func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) 
 		certData, err := d.Client.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
 		if err != nil {
-			log.Printf("获取订单 %d 证书失败: %v", certCfg.OrderID, err)
+			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
+			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
 		} else if certData.Status == "processing" {
 			reason, _ := handleProcessingOrder(certCfg, certData)
 			return nil, "", reason, nil
@@ -779,19 +781,13 @@ func handleFileValidation(domain string, file *api.FileValidation) error {
 	return nil
 }
 
-// isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443）
+// isIPBinding 判断是否是 IP 绑定（如 0.0.0.0:443，支持 IPv4 和 IPv6）
 func isIPBinding(hostnamePort string) bool {
 	host := iis.ParseHostFromBinding(hostnamePort)
 	if host == "" {
 		return false
 	}
-	// 简单判断：全数字和点则认为是 IP
-	for _, c := range host {
-		if c != '.' && (c < '0' || c > '9') {
-			return false
-		}
-	}
-	return true
+	return net.ParseIP(host) != nil
 }
 
 // removeTempFile 清理临时文件（带重试）

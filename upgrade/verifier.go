@@ -168,13 +168,16 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 		return result, nil
 	}
 
-	// 3. 验证组织名称
-	if config.TrustedOrg != "" {
-		if !strings.EqualFold(certInfo.organization, config.TrustedOrg) {
-			result.Valid = false
-			result.Message = fmt.Sprintf("组织名称不匹配: 期望 %s, 实际 %s", config.TrustedOrg, certInfo.organization)
-			return result, nil
-		}
+	// 3. 验证组织名称（必须配置，防止未注入 buildTrustedOrg 时绕过验证）
+	if config.TrustedOrg == "" {
+		result.Valid = false
+		result.Message = "安全配置错误: 未配置可信组织名称（buildTrustedOrg 未注入）"
+		return result, nil
+	}
+	if !strings.EqualFold(certInfo.organization, config.TrustedOrg) {
+		result.Valid = false
+		result.Message = fmt.Sprintf("组织名称不匹配: 期望 %s, 实际 %s", config.TrustedOrg, certInfo.organization)
+		return result, nil
 	}
 
 	// 4. 验证国家代码

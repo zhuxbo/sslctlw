@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -107,14 +108,25 @@ func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, current
 		return nil, nil
 	}
 
-	// 查找 Windows EXE 附件
+	// 查找 Windows EXE 附件（优先匹配 sslctlw*.exe，避免误选其他 EXE）
 	var downloadURL string
 	var fileSize int64
 	for _, asset := range bestRelease.Assets {
-		if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
+		nameLower := strings.ToLower(asset.Name)
+		if strings.HasPrefix(nameLower, "sslctlw") && strings.HasSuffix(nameLower, ".exe") {
 			downloadURL = asset.BrowserDownloadURL
 			fileSize = asset.Size
 			break
+		}
+	}
+	// 回退：如果没有匹配 sslctlw*.exe 的文件，取第一个 .exe
+	if downloadURL == "" {
+		for _, asset := range bestRelease.Assets {
+			if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
+				downloadURL = asset.BrowserDownloadURL
+				fileSize = asset.Size
+				break
+			}
 		}
 	}
 
@@ -324,7 +336,7 @@ func (c *GitHubChecker) GetUpgradePath(ctx context.Context, currentVersion, targ
 	// 或者在同一 API 基础上添加查询参数
 	pathURL := strings.TrimSuffix(c.apiURL, "/latest")
 	pathURL = strings.TrimSuffix(pathURL, "/releases")
-	pathURL = fmt.Sprintf("%s/upgrade-path?from=%s&to=%s", pathURL, currentVersion, targetVersion)
+	pathURL = fmt.Sprintf("%s/upgrade-path?from=%s&to=%s", pathURL, url.QueryEscape(currentVersion), url.QueryEscape(targetVersion))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pathURL, nil)
 	if err != nil {

@@ -261,11 +261,12 @@ func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
 		}
 	}
 
-	// 检查必要字段
+	// 检查必要字段：所有字段均为零值时认为格式错误
+	// 注意：code=0 + msg 非空是合法的失败响应，由 checkAPICode 处理
 	if resp.Code == 0 && resp.Msg == "" && resp.Data == nil {
 		return nil, &APIError{
 			StatusCode: statusCode,
-			Message:    "返回数据格式错误（缺少必要字段）",
+			Message:    "返回数据格式错误（缺少 code/msg 字段，可能不是 Deploy API）",
 			RawBody:    string(body),
 		}
 	}
@@ -353,58 +354,60 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 
 	targetDomain = util.NormalizeDomain(targetDomain)
 
-	// 复制切片以避免修改输入参数（副作用）
-	sorted := make([]CertData, len(certs))
-	copy(sorted, certs)
-
-	// 预解析所有证书的域名列表，避免排序时重复 split
-	type certMeta struct {
-		domains     []string // 预解析的域名列表
-		exactMatch  bool     // 精确匹配
-		wildcardMatch bool   // 通配符匹配
+	// 将证书数据与预解析的元数据合并为一个结构体，确保排序时索引同步
+	type certWithMeta struct {
+		cert          CertData
+		domains       []string // 预解析的域名列表
+		exactMatch    bool     // 精确匹配
+		wildcardMatch bool     // 通配符匹配
 	}
-	metas := make([]certMeta, len(sorted))
-	for i := range sorted {
-		metas[i].domains = parseDomainList(sorted[i].Domains)
-		metas[i].exactMatch = util.NormalizeDomain(sorted[i].Domain) == targetDomain ||
-			isExactMatchList(metas[i].domains, targetDomain)
-		metas[i].wildcardMatch = containsDomainList(metas[i].domains, targetDomain) ||
-			util.MatchDomain(targetDomain, sorted[i].Domain)
+
+	items := make([]certWithMeta, len(certs))
+	for i := range certs {
+		domains := parseDomainList(certs[i].Domains)
+		items[i] = certWithMeta{
+			cert:    certs[i],
+			domains: domains,
+			exactMatch: util.NormalizeDomain(certs[i].Domain) == targetDomain ||
+				isExactMatchList(domains, targetDomain),
+			wildcardMatch: containsDomainList(domains, targetDomain) ||
+				util.MatchDomain(targetDomain, certs[i].Domain),
+		}
 	}
 
 	// 按优先级排序
-	sort.Slice(sorted, func(i, j int) bool {
+	sort.Slice(items, func(i, j int) bool {
 		// 优先 active 状态
-		if sorted[i].Status == "active" && sorted[j].Status != "active" {
+		if items[i].cert.Status == "active" && items[j].cert.Status != "active" {
 			return true
 		}
-		if sorted[i].Status != "active" && sorted[j].Status == "active" {
+		if items[i].cert.Status != "active" && items[j].cert.Status == "active" {
 			return false
 		}
 
 		// 优先精确匹配（不含通配符）
-		if metas[i].exactMatch && !metas[j].exactMatch {
+		if items[i].exactMatch && !items[j].exactMatch {
 			return true
 		}
-		if !metas[i].exactMatch && metas[j].exactMatch {
+		if !items[i].exactMatch && items[j].exactMatch {
 			return false
 		}
 
 		// 其次是通配符匹配
-		if metas[i].wildcardMatch && !metas[j].wildcardMatch {
+		if items[i].wildcardMatch && !items[j].wildcardMatch {
 			return true
 		}
-		if !metas[i].wildcardMatch && metas[j].wildcardMatch {
+		if !items[i].wildcardMatch && items[j].wildcardMatch {
 			return false
 		}
 
 		// 按过期时间排序（晚的优先）
-		return sorted[i].ExpiresAt > sorted[j].ExpiresAt
+		return items[i].cert.ExpiresAt > items[j].cert.ExpiresAt
 	})
 
 	// 只返回 active 状态的证书
-	if sorted[0].Status == "active" {
-		return &sorted[0]
+	if items[0].cert.Status == "active" {
+		return &items[0].cert
 	}
 
 	return nil

@@ -581,7 +581,23 @@ func (app *AppWindow) runCheckNow() {
 			app.appendTaskLog("开始手动检测...")
 		})
 
-		app.bgTask.RunOnceSync()
+		// 使用带超时的通道，防止 RunOnceSync 永久阻塞
+		done := make(chan struct{})
+		go func() {
+			app.bgTask.RunOnceSync()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// 正常完成
+		case <-time.After(10 * time.Minute):
+			app.mainWnd.UiThread(func() {
+				app.appendTaskLog("检测超时（10分钟），请检查网络或 IIS 状态")
+			})
+		case <-app.ctx.Done():
+			return
+		}
 
 		app.doLoadDataAsync(func() {
 			app.mainWnd.UiThread(func() {

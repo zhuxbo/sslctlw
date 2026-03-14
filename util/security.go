@@ -140,6 +140,13 @@ func ValidateSiteName(siteName string) error {
 		return fmt.Errorf("站点名称长度不能超过260个字符")
 	}
 
+	// 拒绝 appcmd XPath 特殊字符（防止命令参数注入）
+	for _, r := range siteName {
+		if r == '[' || r == ']' || r == '\'' || r == '"' || r == ':' || r == '/' || r == '\\' {
+			return fmt.Errorf("站点名称包含不允许的特殊字符: %q", r)
+		}
+	}
+
 	// 白名单验证：只允许特定字符
 	for _, r := range siteName {
 		// 允许：字母、数字

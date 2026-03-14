@@ -58,7 +58,10 @@ func runAutoDeploy() {
 	// 设置日志到配置目录（权限 0600 - 仅所有者可读写）
 	logPath := filepath.Join(config.GetLogDir(), "deploy.log")
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err == nil {
+	if err != nil {
+		// 日志文件打开失败时输出到 stderr 并记录警告
+		fmt.Fprintf(os.Stderr, "警告: 无法打开日志文件 %s: %v，日志将输出到 stderr\n", logPath, err)
+	} else {
 		defer logFile.Close()
 		// 如果是新文件，写入 UTF-8 BOM
 		info, statErr := logFile.Stat()

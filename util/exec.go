@@ -141,13 +141,14 @@ func RunCmdCombined(name string, args ...string) (string, error) {
 }
 
 // GBKToUTF8 将 GBK 编码转换为 UTF-8
-// 如果已经是有效的 UTF-8 且包含中文，则不转换
+// 如果已经是有效的 UTF-8（包括纯 ASCII），则不转换
 func GBKToUTF8(data []byte) ([]byte, error) {
-	// 如果已经是有效的 UTF-8，直接返回
-	if utf8.Valid(data) && containsChineseUTF8(data) {
+	// 有效的 UTF-8 直接返回（纯 ASCII 也是有效的 UTF-8）
+	if utf8.Valid(data) {
 		return data, nil
 	}
 
+	// 非有效 UTF-8，尝试 GBK 解码
 	reader := transform.NewReader(bytes.NewReader(data), simplifiedchinese.GBK.NewDecoder())
 	var buf bytes.Buffer
 	_, err := buf.ReadFrom(reader)

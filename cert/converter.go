@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 
 	"software.sslmate.com/src/go-pkcs12"
+
+	"sslctlw/config"
 )
 
 // PEMToPFX 将 PEM 格式的证书和私钥转换为 PFX 格式
@@ -68,8 +70,11 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 		return "", fmt.Errorf("生成 PFX 失败: %w", err)
 	}
 
-	// 写入临时文件
-	tempDir := os.TempDir()
+	// 写入应用数据目录下的临时文件（避免系统 TEMP 目录的权限问题）
+	tempDir := filepath.Join(config.GetDataDir(), "temp")
+	if mkErr := os.MkdirAll(tempDir, 0700); mkErr != nil {
+		return "", fmt.Errorf("创建临时目录失败: %w", mkErr)
+	}
 	randomStr, err := generateRandomString(8)
 	if err != nil {
 		return "", fmt.Errorf("生成临时文件名失败: %w", err)
