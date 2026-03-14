@@ -28,7 +28,13 @@ func NewGitHubChecker(apiURL string) *GitHubChecker {
 	}
 }
 
+// ReleasesResponse releases.json 响应结构
+type ReleasesResponse struct {
+	Releases []ReleaseResponse `json:"releases"`
+}
+
 // CheckUpdate 检查是否有可用更新
+// 支持 releases.json 数组格式 {"releases": [...]}
 func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, currentVersion string) (*ReleaseInfo, error) {
 	if c.apiURL == "" {
 		return nil, fmt.Errorf("Release API 地址未配置")
@@ -39,7 +45,7 @@ func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, current
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "sslctlw-updater")
 
 	resp, err := c.httpClient.Do(req)
@@ -61,31 +67,50 @@ func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, current
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
-	var release ReleaseResponse
-	if err := json.Unmarshal(body, &release); err != nil {
+	// 解析 releases.json 数组格式
+	var releasesResp ReleasesResponse
+	if err := json.Unmarshal(body, &releasesResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
 
-	// 解析版本号（去掉 v 前缀）
-	version := strings.TrimPrefix(release.TagName, "v")
-
-	// 检查通道
-	// stable 通道不接收 prerelease 版本
-	// beta 通道接收所有版本
-	if channel == string(ChannelStable) && release.Prerelease {
+	if len(releasesResp.Releases) == 0 {
 		return nil, nil
 	}
 
-	// 比较版本号
-	cmp := CompareVersion(version, currentVersion)
-	if cmp <= 0 {
-		return nil, nil // 当前版本已是最新或更新
+	// 遍历所有 release，找到比当前版本新的最新版本
+	var bestRelease *ReleaseResponse
+	var bestVersion string
+
+	for i := range releasesResp.Releases {
+		release := &releasesResp.Releases[i]
+
+		// stable 通道不接收 prerelease 版本
+		if channel == string(ChannelStable) && release.Prerelease {
+			continue
+		}
+
+		version := strings.TrimPrefix(release.TagName, "v")
+
+		// 必须比当前版本新
+		if CompareVersion(version, currentVersion) <= 0 {
+			continue
+		}
+
+		// 找最新的
+		if bestRelease == nil || CompareVersion(version, bestVersion) > 0 {
+			bestRelease = release
+			bestVersion = version
+		}
+	}
+
+	if bestRelease == nil {
+		return nil, nil
 	}
 
 	// 查找 Windows EXE 附件
 	var downloadURL string
 	var fileSize int64
-	for _, asset := range release.Assets {
+	for _, asset := range bestRelease.Assets {
 		if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
 			downloadURL = asset.BrowserDownloadURL
 			fileSize = asset.Size
@@ -98,33 +123,25 @@ func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, current
 	}
 
 	// 解析发布说明中的元数据
-	metadata := parseMetadata(release.Body)
+	metadata := parseMetadata(bestRelease.Body)
 
 	// 确定通道
 	ch := ChannelStable
-	if release.Prerelease {
+	if bestRelease.Prerelease {
 		ch = ChannelBeta
 	}
 
 	info := &ReleaseInfo{
-		Version:      version,
+		Version:      bestVersion,
 		Channel:      ch,
 		DownloadURL:  downloadURL,
 		FileSize:     fileSize,
-		ReleaseNotes: cleanReleaseNotes(release.Body),
+		ReleaseNotes: cleanReleaseNotes(bestRelease.Body),
 		MinVersion:   metadata["min_version"],
 	}
 
-	// 解析指纹列表
-	if fps := metadata["fingerprints"]; fps != "" {
-		info.Fingerprints = strings.Split(fps, ",")
-		for i := range info.Fingerprints {
-			info.Fingerprints[i] = strings.TrimSpace(info.Fingerprints[i])
-		}
-	}
-
 	// 解析发布时间
-	if t, err := time.Parse(time.RFC3339, release.PublishedAt); err == nil {
+	if t, err := time.Parse(time.RFC3339, bestRelease.PublishedAt); err == nil {
 		info.ReleaseDate = t
 	}
 

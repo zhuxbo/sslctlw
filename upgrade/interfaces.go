@@ -39,13 +39,12 @@ type FileDownloader interface {
 type SignatureVerifier interface {
 	// Verify 验证文件签名
 	// filePath: 文件路径
-	// trustedFingerprints: 预埋的证书指纹白名单
-	// fallbackConfig: 回退验证配置（指纹不匹配时使用）
-	Verify(filePath string, trustedFingerprints []string, fallbackConfig *FallbackVerifyConfig) (*VerifyResult, error)
+	// config: 验证配置（org/country/CA 匹配）
+	Verify(filePath string, config *VerifyConfig) (*VerifyResult, error)
 }
 
-// FallbackVerifyConfig 回退验证配置
-type FallbackVerifyConfig struct {
+// VerifyConfig 签名验证配置
+type VerifyConfig struct {
 	TrustedOrg     string   // 可信组织名称（精确匹配）
 	TrustedCountry string   // 可信国家代码（精确匹配）
 	TrustedCAs     []string // 可信 CA 列表

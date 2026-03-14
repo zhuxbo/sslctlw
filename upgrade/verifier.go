@@ -138,7 +138,7 @@ func NewAuthenticodeVerifier() *AuthenticodeVerifier {
 }
 
 // Verify 验证文件签名
-func (v *AuthenticodeVerifier) Verify(filePath string, trustedFingerprints []string, fallbackConfig *FallbackVerifyConfig) (*VerifyResult, error) {
+func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*VerifyResult, error) {
 	result := &VerifyResult{
 		Valid: false,
 	}
@@ -163,46 +163,33 @@ func (v *AuthenticodeVerifier) Verify(filePath string, trustedFingerprints []str
 	result.Issuer = certInfo.issuer
 	result.Valid = true
 
-	// 3. 检查指纹是否在白名单中
-	for _, fp := range trustedFingerprints {
-		if strings.EqualFold(fp, certInfo.fingerprint) {
-			result.FingerprintMatch = true
-			result.Message = "签名验证通过（指纹匹配）"
-			return result, nil
-		}
-	}
-
-	// 4. 指纹不匹配，进入回退验证
-	if fallbackConfig == nil {
-		result.Valid = false
-		result.Message = "证书指纹不在白名单中"
+	if config == nil {
+		result.Message = "签名验证通过"
 		return result, nil
 	}
 
-	result.FallbackUsed = true
-
-	// 验证组织名称
-	if fallbackConfig.TrustedOrg != "" {
-		if !strings.EqualFold(certInfo.organization, fallbackConfig.TrustedOrg) {
+	// 3. 验证组织名称
+	if config.TrustedOrg != "" {
+		if !strings.EqualFold(certInfo.organization, config.TrustedOrg) {
 			result.Valid = false
-			result.Message = fmt.Sprintf("组织名称不匹配: 期望 %s, 实际 %s", fallbackConfig.TrustedOrg, certInfo.organization)
+			result.Message = fmt.Sprintf("组织名称不匹配: 期望 %s, 实际 %s", config.TrustedOrg, certInfo.organization)
 			return result, nil
 		}
 	}
 
-	// 验证国家代码
-	if fallbackConfig.TrustedCountry != "" {
-		if !strings.EqualFold(certInfo.country, fallbackConfig.TrustedCountry) {
+	// 4. 验证国家代码
+	if config.TrustedCountry != "" {
+		if !strings.EqualFold(certInfo.country, config.TrustedCountry) {
 			result.Valid = false
-			result.Message = fmt.Sprintf("国家代码不匹配: 期望 %s, 实际 %s", fallbackConfig.TrustedCountry, certInfo.country)
+			result.Message = fmt.Sprintf("国家代码不匹配: 期望 %s, 实际 %s", config.TrustedCountry, certInfo.country)
 			return result, nil
 		}
 	}
 
-	// 验证 CA
-	if len(fallbackConfig.TrustedCAs) > 0 {
+	// 5. 验证 CA
+	if len(config.TrustedCAs) > 0 {
 		caMatched := false
-		for _, ca := range fallbackConfig.TrustedCAs {
+		for _, ca := range config.TrustedCAs {
 			if strings.Contains(strings.ToLower(certInfo.issuer), strings.ToLower(ca)) {
 				caMatched = true
 				break
@@ -215,11 +202,8 @@ func (v *AuthenticodeVerifier) Verify(filePath string, trustedFingerprints []str
 		}
 	}
 
-	// 回退验证通过，需要用户确认
-	result.NeedsConfirm = true
-	result.Message = fmt.Sprintf("证书指纹已更新，请确认是否信任新证书\n组织: %s\n国家: %s\nCA: %s\n指纹: %s",
-		certInfo.organization, certInfo.country, certInfo.issuer, certInfo.fingerprint)
-
+	// 全部验证通过
+	result.Message = "签名验证通过"
 	return result, nil
 }
 

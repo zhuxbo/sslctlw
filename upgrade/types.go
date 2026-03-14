@@ -1,14 +1,12 @@
 package upgrade
 
 import (
-	"strings"
 	"time"
 )
 
 // 编译时注入的安全配置（通过 ldflags 设置）
-// 示例: go build -ldflags="-X sslctlw/upgrade.buildFingerprints=FP1,FP2 -X sslctlw/upgrade.buildTrustedOrg=MyOrg"
+// 示例: go build -ldflags="-X sslctlw/upgrade.buildTrustedOrg=MyOrg"
 var (
-	buildFingerprints   = "" // 逗号分隔的证书指纹列表
 	buildTrustedOrg     = "" // 可信组织名称
 	buildTrustedCountry = "" // 可信国家代码，默认 CN
 )
@@ -30,7 +28,6 @@ type ReleaseInfo struct {
 	FileSize     int64     `json:"file_size"`     // 文件大小（字节）
 	ReleaseNotes string    `json:"release_notes"` // 更新说明
 	MinVersion   string    `json:"min_version"`   // 最低要求版本（不可跳过版本）
-	Fingerprints []string  `json:"fingerprints"`  // 允许的证书指纹（服务端下发）
 }
 
 // UpgradePath 升级路径（用于链式跨版本升级）
@@ -40,11 +37,10 @@ type UpgradePath struct {
 
 // UpgradeStep 升级步骤
 type UpgradeStep struct {
-	Version      string   `json:"version"`      // 目标版本
-	DownloadURL  string   `json:"download_url"` // 下载地址
-	FileSize     int64    `json:"file_size"`    // 文件大小
-	Fingerprints []string `json:"fingerprints"` // 证书指纹
-	ReleaseNotes string   `json:"release_notes"`// 更新说明
+	Version      string `json:"version"`       // 目标版本
+	DownloadURL  string `json:"download_url"`  // 下载地址
+	FileSize     int64  `json:"file_size"`     // 文件大小
+	ReleaseNotes string `json:"release_notes"` // 更新说明
 }
 
 // ReleaseResponse GitHub Release API 响应结构
@@ -67,16 +63,13 @@ type ReleaseAsset struct {
 
 // VerifyResult 签名验证结果
 type VerifyResult struct {
-	Valid            bool   // 签名有效
-	Fingerprint      string // 证书指纹（SHA-256）
-	Subject          string // 证书主题
-	Organization     string // 组织名称
-	Country          string // 国家代码
-	Issuer           string // CA 名称
-	FingerprintMatch bool   // 指纹是否匹配白名单
-	FallbackUsed     bool   // 是否使用了回退验证
-	NeedsConfirm     bool   // 是否需要用户确认
-	Message          string // 验证消息
+	Valid        bool   // 签名有效
+	Fingerprint  string // 证书指纹（SHA-256）
+	Subject      string // 证书主题
+	Organization string // 组织名称
+	Country      string // 国家代码
+	Issuer       string // CA 名称
+	Message      string // 验证消息
 }
 
 // UpdatePlan 更新计划
@@ -151,7 +144,6 @@ type Config struct {
 	ReleaseURL     string   `json:"release_url"`        // Release API 地址
 
 	// 以下为预埋配置（编译时写入，不存储到配置文件）
-	Fingerprints   []string `json:"-"` // EV 证书指纹白名单
 	TrustedOrg     string   `json:"-"` // 可信组织名称
 	TrustedCountry string   `json:"-"` // 可信国家代码
 	TrustedCAs     []string `json:"-"` // 可信 CA 列表
@@ -159,16 +151,6 @@ type Config struct {
 
 // DefaultConfig 返回默认升级配置
 func DefaultConfig() *Config {
-	// 解析编译时注入的指纹列表
-	var fingerprints []string
-	if buildFingerprints != "" {
-		for _, fp := range strings.Split(buildFingerprints, ",") {
-			if fp = strings.TrimSpace(fp); fp != "" {
-				fingerprints = append(fingerprints, fp)
-			}
-		}
-	}
-
 	// 国家代码默认 CN
 	country := buildTrustedCountry
 	if country == "" {
@@ -182,16 +164,15 @@ func DefaultConfig() *Config {
 		ReleaseURL:    "", // 需要用户配置
 
 		// 安全配置（编译时通过 ldflags 注入）
-		Fingerprints:   fingerprints,
 		TrustedOrg:     buildTrustedOrg,
 		TrustedCountry: country,
 		TrustedCAs:     []string{"DigiCert", "Sectigo", "GlobalSign"}, // 常见 EV CA
 	}
 }
 
-// GetFallbackConfig 获取回退验证配置
-func (c *Config) GetFallbackConfig() *FallbackVerifyConfig {
-	return &FallbackVerifyConfig{
+// GetVerifyConfig 获取签名验证配置
+func (c *Config) GetVerifyConfig() *VerifyConfig {
+	return &VerifyConfig{
 		TrustedOrg:     c.TrustedOrg,
 		TrustedCountry: c.TrustedCountry,
 		TrustedCAs:     c.TrustedCAs,

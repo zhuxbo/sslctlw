@@ -172,26 +172,26 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
-// TestGetFallbackConfig 测试获取回退验证配置
-func TestGetFallbackConfig(t *testing.T) {
+// TestGetVerifyConfig 测试获取签名验证配置
+func TestGetVerifyConfig(t *testing.T) {
 	cfg := &Config{
 		TrustedOrg:     "TestOrg",
 		TrustedCountry: "US",
 		TrustedCAs:     []string{"CA1", "CA2"},
 	}
 
-	fallback := cfg.GetFallbackConfig()
+	vc := cfg.GetVerifyConfig()
 
-	if fallback.TrustedOrg != "TestOrg" {
-		t.Errorf("TrustedOrg = %q, want 'TestOrg'", fallback.TrustedOrg)
+	if vc.TrustedOrg != "TestOrg" {
+		t.Errorf("TrustedOrg = %q, want 'TestOrg'", vc.TrustedOrg)
 	}
 
-	if fallback.TrustedCountry != "US" {
-		t.Errorf("TrustedCountry = %q, want 'US'", fallback.TrustedCountry)
+	if vc.TrustedCountry != "US" {
+		t.Errorf("TrustedCountry = %q, want 'US'", vc.TrustedCountry)
 	}
 
-	if len(fallback.TrustedCAs) != 2 {
-		t.Errorf("TrustedCAs 长度 = %d, want 2", len(fallback.TrustedCAs))
+	if len(vc.TrustedCAs) != 2 {
+		t.Errorf("TrustedCAs 长度 = %d, want 2", len(vc.TrustedCAs))
 	}
 }
 

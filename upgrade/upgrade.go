@@ -163,12 +163,7 @@ func (u *Upgrader) ChainUpgrade(ctx context.Context, path *UpgradePath, confirmF
 		u.updateProgress(StatusVerifying,
 			fmt.Sprintf("正在验证 %s (%d/%d)...", step.Version, i+1, total), 0, 0, 0)
 
-		fingerprints := u.Config.Fingerprints
-		if len(step.Fingerprints) > 0 && len(fingerprints) == 0 {
-			fingerprints = step.Fingerprints
-		}
-
-		verifyResult, err := u.Verifier.Verify(tempPath, fingerprints, u.Config.GetFallbackConfig())
+		verifyResult, err := u.Verifier.Verify(tempPath, u.Config.GetVerifyConfig())
 		if err != nil {
 			os.Remove(tempPath)
 			return lastVersion, fmt.Errorf("验证版本 %s 失败: %w", step.Version, err)
@@ -177,12 +172,6 @@ func (u *Upgrader) ChainUpgrade(ctx context.Context, path *UpgradePath, confirmF
 		if !verifyResult.Valid {
 			os.Remove(tempPath)
 			return lastVersion, fmt.Errorf("版本 %s 签名无效: %s", step.Version, verifyResult.Message)
-		}
-
-		// 如果需要用户确认新证书，在链式升级中自动拒绝（安全考虑）
-		if verifyResult.NeedsConfirm {
-			os.Remove(tempPath)
-			return lastVersion, fmt.Errorf("版本 %s 使用了新证书，链式升级不支持自动确认，请手动升级", step.Version)
 		}
 
 		// 应用
@@ -266,17 +255,7 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 	// 验证签名
 	u.updateProgress(StatusVerifying, "正在验证签名...", 0, 0, 0)
 
-	// 合并预埋指纹和服务端下发的指纹
-	fingerprints := u.Config.Fingerprints
-	if len(info.Fingerprints) > 0 {
-		// 服务端下发的指纹必须与预埋指纹有交集（如果预埋了的话）
-		// 这里简单处理：如果预埋了指纹，优先使用预埋的
-		if len(fingerprints) == 0 {
-			fingerprints = info.Fingerprints
-		}
-	}
-
-	verifyResult, err := u.Verifier.Verify(tempPath, fingerprints, u.Config.GetFallbackConfig())
+	verifyResult, err := u.Verifier.Verify(tempPath, u.Config.GetVerifyConfig())
 	if err != nil {
 		os.Remove(tempPath)
 		u.updateProgress(StatusFailed, fmt.Sprintf("验证失败: %v", err), 0, 0, 0)
@@ -293,11 +272,7 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 	u.progress.CanRollback = true
 	u.mu.Unlock()
 
-	if verifyResult.NeedsConfirm {
-		u.updateProgress(StatusReady, "需要确认新证书", 0, 0, 0)
-	} else {
-		u.updateProgress(StatusReady, "更新已准备就绪", 0, 0, 0)
-	}
+	u.updateProgress(StatusReady, "更新已准备就绪", 0, 0, 0)
 
 	return tempPath, verifyResult, nil
 }

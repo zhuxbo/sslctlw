@@ -7,17 +7,22 @@ param(
 )
 
 # 读取环境变量
-$fingerprints = $env:UPGRADE_FINGERPRINTS
 $trustedOrg = $env:UPGRADE_TRUSTED_ORG
 $trustedCountry = $env:UPGRADE_TRUSTED_COUNTRY
 if (-not $trustedCountry) { $trustedCountry = "CN" }
 
+# 运行测试
+Write-Host "Running tests..." -ForegroundColor Cyan
+go test ./...
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`nTests failed! Aborting build." -ForegroundColor Red
+    exit 1
+}
+Write-Host "Tests passed.`n" -ForegroundColor Green
+
 # 构建 ldflags
 $ldflags = "-X main.version=$Version"
 
-if ($fingerprints) {
-    $ldflags += " -X 'sslctlw/upgrade.buildFingerprints=$fingerprints'"
-}
 if ($trustedOrg) {
     $ldflags += " -X 'sslctlw/upgrade.buildTrustedOrg=$trustedOrg'"
 }
@@ -29,19 +34,22 @@ if (-not $Debug) {
     $ldflags += " -s -w -H windowsgui"
 }
 
+# 创建输出目录
+if (-not (Test-Path "dist")) {
+    New-Item -ItemType Directory -Path "dist" | Out-Null
+}
+
 Write-Host "Building sslctlw.exe..."
 Write-Host "  Version: $Version"
-Write-Host "  Fingerprints: $(if ($fingerprints) { 'configured' } else { 'not set' })"
 Write-Host "  Trusted Org: $(if ($trustedOrg) { $trustedOrg } else { 'not set' })"
 Write-Host "  Country: $trustedCountry"
 
-$cmd = "go build -trimpath -ldflags=`"$ldflags`" -o sslctlw.exe"
-Write-Host "`nExecuting: $cmd`n"
+Write-Host "`nExecuting: go build -trimpath -ldflags=`"$ldflags`" -o dist/sslctlw.exe`n"
 
-Invoke-Expression $cmd
+& go build -trimpath -ldflags="$ldflags" -o dist/sslctlw.exe
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nBuild successful: sslctlw.exe" -ForegroundColor Green
+    Write-Host "`nBuild successful: dist/sslctlw.exe" -ForegroundColor Green
 } else {
     Write-Host "`nBuild failed!" -ForegroundColor Red
     exit 1

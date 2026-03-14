@@ -43,7 +43,7 @@ go build -ldflags="-X main.version=1.0.0"
 
 ## 升级安全配置注入
 
-升级功能需要在编译时注入安全配置（防止运行时被篡改）。
+升级功能在编译时注入安全配置（防止运行时被篡改）。仅校验 EV 签名的组织名、国家代码和 CA。
 
 ### 环境变量
 
@@ -51,13 +51,11 @@ go build -ldflags="-X main.version=1.0.0"
 
 | 环境变量 | 说明 | 示例 |
 |----------|------|------|
-| `UPGRADE_FINGERPRINTS` | EV 证书 SHA256 指纹（逗号分隔） | `ABC123...,DEF456...` |
 | `UPGRADE_TRUSTED_ORG` | 可信组织名称（精确匹配） | `My Company Ltd` |
 | `UPGRADE_TRUSTED_COUNTRY` | 国家代码（默认 CN） | `CN` |
 
 ```powershell
 # 设置环境变量后构建
-$env:UPGRADE_FINGERPRINTS = "ABC123..."
 $env:UPGRADE_TRUSTED_ORG = "My Company Ltd"
 .\build.ps1 -Version "1.0.0"
 ```
@@ -66,24 +64,63 @@ $env:UPGRADE_TRUSTED_ORG = "My Company Ltd"
 
 | 环境变量 | ldflags 变量 |
 |----------|--------------|
-| `UPGRADE_FINGERPRINTS` | `sslctlw/upgrade.buildFingerprints` |
 | `UPGRADE_TRUSTED_ORG` | `sslctlw/upgrade.buildTrustedOrg` |
 | `UPGRADE_TRUSTED_COUNTRY` | `sslctlw/upgrade.buildTrustedCountry` |
 
-### 获取 EV 证书指纹
+## 升级验证机制
 
-```powershell
-# 对已签名的 EXE 获取证书 SHA256 指纹
-$cert = (Get-AuthenticodeSignature .\sslctlw.exe).SignerCertificate
-[System.BitConverter]::ToString($cert.GetCertHash('SHA256')).Replace('-','')
+升级下载的 EXE 会经过以下验证：
+
+1. **Authenticode 签名** — WinVerifyTrust 验证签名有效性
+2. **组织名称** — 精确匹配编译时预埋的 `TrustedOrg`
+3. **国家代码** — 精确匹配 `TrustedCountry`（默认 CN）
+4. **CA 颁发者** — 匹配可信 CA 列表（DigiCert/Sectigo/GlobalSign）
+5. 全部通过 → 直接升级（无需用户确认）
+
+## 两步发布流程
+
+```
+1. .\build.ps1 -Version 1.0.0                                         # 本地构建（输出到 dist/）
+2. 云端 EV 签名 dist/sslctlw.exe                                       # 人工签名
+3. ./scripts/release.sh 1.0.0 --exe-path dist/sslctlw.exe             # 发布到 release 服务器
+```
+
+### 发布脚本
+
+| 脚本 | 说明 |
+|------|------|
+| `scripts/release.sh` | 远程发布脚本（验证签名 → SSH 上传 → 更新 releases.json） |
+| `scripts/release-common.sh` | 公共函数库（日志、版本、releases.json 生成） |
+| `scripts/release.conf.example` | 配置模板（服务器列表、SSH 认证） |
+
+### releases.json 格式
+
+升级检测使用 `releases.json` 数组格式：
+
+```json
+{
+  "releases": [
+    {
+      "tag_name": "v1.0.0",
+      "name": "v1.0.0",
+      "prerelease": false,
+      "published_at": "2026-03-14T...",
+      "assets": [
+        {
+          "name": "sslctlw.exe",
+          "size": 12345678,
+          "browser_download_url": "https://release.example.com/sslctlw/main/v1.0.0/sslctlw.exe"
+        }
+      ]
+    }
+  ]
+}
 ```
 
 ## 发布清单
 
-1. 获取 EV 证书 SHA256 指纹
-2. 构建：`go build -ldflags="-s -w -H windowsgui -X main.version=X.Y.Z -X 'sslctlw/upgrade.buildFingerprints=...' -X 'sslctlw/upgrade.buildTrustedOrg=...'"`
-3. 代码签名
-4. 验证管理员权限提示
-5. 测试 IIS 扫描/证书绑定
-6. 测试升级功能
-7. `git tag vX.Y.Z && git push --tags`
+1. 构建：`.\build.ps1 -Version X.Y.Z`
+2. EV 代码签名
+3. 发布：`./scripts/release.sh X.Y.Z --exe-path dist/sslctlw.exe`
+4. 验证：`curl <release-url>/releases.json | jq .`
+5. `git tag vX.Y.Z && git push --tags`

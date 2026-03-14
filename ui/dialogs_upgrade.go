@@ -119,7 +119,6 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 		SkippedVersion: cfg.SkippedVersion,
 		ReleaseURL:     cfg.ReleaseURL,
 		// 安全配置从默认配置获取（编译时注入）
-		Fingerprints:   defaultCfg.Fingerprints,
 		TrustedOrg:     defaultCfg.TrustedOrg,
 		TrustedCountry: defaultCfg.TrustedCountry,
 		TrustedCAs:     defaultCfg.TrustedCAs,
@@ -309,7 +308,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 			}
 
 			// 普通升级：下载并验证
-			path, result, err := upgrader.DownloadAndVerify(dlgCtx, latestInfo)
+			path, _, err := upgrader.DownloadAndVerify(dlgCtx, latestInfo)
 
 			if dlgCtx.Err() != nil {
 				return
@@ -329,22 +328,8 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 
 				downloadedPath = path
 
-				// 检查是否需要用户确认（回退验证）
-				if result.NeedsConfirm {
-					showCertConfirmDialog(dlg, result, func(confirmed bool) {
-						if confirmed {
-							applyUpdate(dlg, dlgCtx, upgrader, downloadedPath, latestInfo.Version,
-								lblStatus, lblProgress, btnUpdate, btnSkip, btnClose, onComplete)
-						} else {
-							lblStatus.Hwnd().SetWindowText("用户取消升级")
-							btnUpdate.Hwnd().EnableWindow(true)
-							btnSkip.Hwnd().EnableWindow(true)
-						}
-					})
-				} else {
-					applyUpdate(dlg, dlgCtx, upgrader, downloadedPath, latestInfo.Version,
-						lblStatus, lblProgress, btnUpdate, btnSkip, btnClose, onComplete)
-				}
+				applyUpdate(dlg, dlgCtx, upgrader, downloadedPath, latestInfo.Version,
+					lblStatus, lblProgress, btnUpdate, btnSkip, btnClose, onComplete)
 			})
 		}()
 	})
@@ -482,95 +467,6 @@ func applyUpdate(dlg *ui.Modal, ctx context.Context, upgrader *upgrade.Upgrader,
 	}()
 }
 
-// showCertConfirmDialog 显示证书确认对话框
-func showCertConfirmDialog(owner ui.Parent, result *upgrade.VerifyResult, onResult func(confirmed bool)) {
-	dlg := ui.NewModal(owner,
-		ui.OptsModal().
-			Title("安全提示").
-			Size(ui.Dpi(450, 300)).
-			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
-	)
-
-	// 警告图标（使用文字代替）
-	ui.NewStatic(dlg,
-		ui.OptsStatic().
-			Text("⚠").
-			Position(ui.Dpi(20, 20)),
-	)
-
-	// 警告标题
-	ui.NewStatic(dlg,
-		ui.OptsStatic().
-			Text("证书指纹已更新").
-			Position(ui.Dpi(50, 20)),
-	)
-
-	// 说明文字
-	ui.NewStatic(dlg,
-		ui.OptsStatic().
-			Text("下载的更新文件使用了新的签名证书。\r\n请确认以下信息是否正确：").
-			Position(ui.Dpi(20, 50)).
-			Size(ui.Dpi(410, 40)),
-	)
-
-	// 证书信息
-	certInfo := fmt.Sprintf("组织: %s\r\n国家: %s\r\n颁发者: %s\r\n指纹: %s",
-		result.Organization, result.Country, result.Issuer, result.Fingerprint)
-
-	txtCertInfo := ui.NewEdit(dlg,
-		ui.OptsEdit().
-			Position(ui.Dpi(20, 95)).
-			Width(ui.DpiX(410)).
-			Height(ui.DpiY(100)).
-			Text(certInfo).
-			CtrlStyle(co.ES_MULTILINE|co.ES_READONLY).
-			WndStyle(co.WS_CHILD|co.WS_VISIBLE|co.WS_BORDER),
-	)
-	_ = txtCertInfo
-
-	// 提示
-	ui.NewStatic(dlg,
-		ui.OptsStatic().
-			Text("如果您确认此证书来自可信来源，请点击\"信任并继续\"。").
-			Position(ui.Dpi(20, 205)).
-			Size(ui.Dpi(410, 20)),
-	)
-
-	// 信任并继续按钮
-	btnTrust := ui.NewButton(dlg,
-		ui.OptsButton().
-			Text("信任并继续").
-			Position(ui.Dpi(230, 235)).
-			Width(ui.DpiX(100)).
-			Height(ui.DpiY(30)),
-	)
-
-	// 取消按钮
-	btnCancel := ui.NewButton(dlg,
-		ui.OptsButton().
-			Text("取消").
-			Position(ui.Dpi(340, 235)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(30)),
-	)
-
-	confirmed := false
-
-	btnTrust.On().BnClicked(func() {
-		confirmed = true
-		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
-	})
-
-	btnCancel.On().BnClicked(func() {
-		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
-	})
-
-	dlg.On().WmDestroy(func() {
-		onResult(confirmed)
-	})
-
-	dlg.ShowModal()
-}
 
 // showConfigureReleaseURLDialog 弹出 Release URL 配置对话框
 // 返回用户输入的 URL（空字符串表示用户取消）

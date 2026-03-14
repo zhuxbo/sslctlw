@@ -1,4 +1,4 @@
-// +build windows
+//go:build windows
 
 package upgrade
 
@@ -19,16 +19,13 @@ func TestNewAuthenticodeVerifier(t *testing.T) {
 // TestVerifyResult 测试验证结果结构
 func TestVerifyResult(t *testing.T) {
 	result := &VerifyResult{
-		Valid:            true,
-		Fingerprint:      "ABC123",
-		Subject:          "Test Subject",
-		Organization:     "Test Org",
-		Country:          "CN",
-		Issuer:           "Test CA",
-		FingerprintMatch: true,
-		FallbackUsed:     false,
-		NeedsConfirm:     false,
-		Message:          "验证成功",
+		Valid:        true,
+		Fingerprint:  "ABC123",
+		Subject:      "Test Subject",
+		Organization: "Test Org",
+		Country:      "CN",
+		Issuer:       "Test CA",
+		Message:      "验证成功",
 	}
 
 	if !result.Valid {
@@ -40,9 +37,9 @@ func TestVerifyResult(t *testing.T) {
 	}
 }
 
-// TestFallbackVerifyConfig 测试回退验证配置
-func TestFallbackVerifyConfig(t *testing.T) {
-	cfg := &FallbackVerifyConfig{
+// TestVerifyConfig 测试验证配置
+func TestVerifyConfig(t *testing.T) {
+	cfg := &VerifyConfig{
 		TrustedOrg:     "MyOrg",
 		TrustedCountry: "CN",
 		TrustedCAs:     []string{"DigiCert", "Sectigo"},
@@ -89,7 +86,7 @@ func TestVerifyUnsignedFile(t *testing.T) {
 	}
 
 	verifier := NewAuthenticodeVerifier()
-	result, err := verifier.Verify(tmpFile, nil, nil)
+	result, err := verifier.Verify(tmpFile, nil)
 
 	// 未签名文件应该验证失败
 	if err == nil && result != nil && result.Valid {
@@ -102,7 +99,7 @@ func TestVerifyUnsignedFile(t *testing.T) {
 // TestVerifyNonExistentFile 测试验证不存在的文件
 func TestVerifyNonExistentFile(t *testing.T) {
 	verifier := NewAuthenticodeVerifier()
-	result, err := verifier.Verify("/nonexistent/file.exe", nil, nil)
+	result, err := verifier.Verify("/nonexistent/file.exe", nil)
 
 	// 验证不存在的文件应该返回错误或 Valid=false
 	if err == nil && result != nil && result.Valid {
@@ -126,7 +123,7 @@ func TestVerifyCurrentExecutable(t *testing.T) {
 	}
 
 	verifier := NewAuthenticodeVerifier()
-	result, err := verifier.Verify(exe, nil, nil)
+	result, err := verifier.Verify(exe, nil)
 
 	// 测试环境的 go test 二进制可能未签名，这是正常的
 	if err != nil {

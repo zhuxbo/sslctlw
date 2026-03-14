@@ -866,7 +866,6 @@ func (app *AppWindow) checkAutoUpgrade() {
 			LastCheck:      cfg.LastUpgradeCheck,
 			SkippedVersion: cfg.SkippedVersion,
 			ReleaseURL:     cfg.ReleaseURL,
-			Fingerprints:   defaultCfg.Fingerprints,
 			TrustedOrg:     defaultCfg.TrustedOrg,
 			TrustedCountry: defaultCfg.TrustedCountry,
 			TrustedCAs:     defaultCfg.TrustedCAs,
