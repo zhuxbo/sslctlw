@@ -1,0 +1,63 @@
+# Docker Compose: IIS 兼容性测试
+# 用法: docker-compose build && docker-compose up
+#
+# 每个服务对应一个 Windows Server 版本，使用 Hyper-V 隔离
+
+services:
+  test-2016:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WINDOWS_VERSION: ltsc2016
+    isolation: hyperv
+    environment:
+      - TEST_LOCAL_ONLY=1
+      - WINDOWS_VERSION=2016
+    volumes:
+      - results-2016:C:\test-results
+
+  test-2019:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WINDOWS_VERSION: ltsc2019
+    isolation: hyperv
+    environment:
+      - TEST_LOCAL_ONLY=1
+      - WINDOWS_VERSION=2019
+    volumes:
+      - results-2019:C:\test-results
+
+  test-2022:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WINDOWS_VERSION: ltsc2022
+    isolation: hyperv
+    environment:
+      - TEST_LOCAL_ONLY=1
+      - WINDOWS_VERSION=2022
+    volumes:
+      - results-2022:C:\test-results
+
+  test-2025:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        WINDOWS_VERSION: ltsc2025
+    isolation: hyperv
+    environment:
+      - TEST_LOCAL_ONLY=1
+      - WINDOWS_VERSION=2025
+    volumes:
+      - results-2025:C:\test-results
+
+volumes:
+  results-2016:
+  results-2019:
+  results-2022:
+  results-2025:

@@ -25,6 +25,7 @@ Desktop.ini
 .DS_Store
 
 # Debug
+*.err
 *.log
 debug/
 

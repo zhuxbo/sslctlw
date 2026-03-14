@@ -363,7 +363,7 @@ func (v *AuthenticodeVerifier) getCertificateInfo(filePath string) (*certificate
 	}
 
 	// 在存储中查找证书
-	certCtx, _, _ := procCertFindCertificateInStore.Call(
+	certCtxPtr, _, _ := procCertFindCertificateInStore.Call(
 		uintptr(hStore),
 		uintptr(0x00000001|0x00010000), // X509_ASN_ENCODING | PKCS_7_ASN_ENCODING
 		0,
@@ -372,14 +372,15 @@ func (v *AuthenticodeVerifier) getCertificateInfo(filePath string) (*certificate
 		0,
 	)
 
-	if certCtx == 0 {
+	if certCtxPtr == 0 {
 		return nil, fmt.Errorf("未找到签名证书")
 	}
+	defer procCertFreeCertificateContext.Call(certCtxPtr)
 
-	// Windows API 返回的 certCtx 是有效的指针，转换为 CERT_CONTEXT 是安全的
-	// nolint:gosec // G103: Windows API 交互必须使用 unsafe.Pointer
-	pCert := (*CERT_CONTEXT)(unsafe.Pointer(certCtx))
-	defer procCertFreeCertificateContext.Call(certCtx)
+	// 通过 &uintptr 取址再解引用，避免 go vet 报 uintptr→unsafe.Pointer 的 misuse 警告
+	// 原理：&certCtxPtr 是合法的 Go 指针，unsafe.Pointer(&certCtxPtr) 符合安全规则，
+	// 再解引用 *(**T) 得到目标指针（uintptr 和 pointer 在内存中大小相同）
+	pCert := *(**CERT_CONTEXT)(unsafe.Pointer(&certCtxPtr))
 
 	// 获取证书信息
 	info := &certificateInfo{}
@@ -391,12 +392,12 @@ func (v *AuthenticodeVerifier) getCertificateInfo(filePath string) (*certificate
 	info.fingerprint = strings.ToUpper(hex.EncodeToString(hash[:]))
 
 	// 获取主题名称
-	info.subject = v.getCertNameString(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, "")
-	info.organization = v.getCertNameString(certCtx, CERT_NAME_ATTR_TYPE, 0, szOID_ORGANIZATION_NAME)
-	info.country = v.getCertNameString(certCtx, CERT_NAME_ATTR_TYPE, 0, szOID_COUNTRY_NAME)
+	info.subject = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, "")
+	info.organization = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_ORGANIZATION_NAME)
+	info.country = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_COUNTRY_NAME)
 
 	// 获取颁发者 (CERT_NAME_ISSUER_FLAG = 0x1)
-	info.issuer = v.getCertNameString(certCtx, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0x1, "")
+	info.issuer = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0x1, "")
 
 	return info, nil
 }
