@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"encoding/pem"
 	"sslctlw/config"
 )
 
@@ -36,9 +37,9 @@ func DecryptPrivateKey(encrypted string) (string, error) {
 	if !strings.HasPrefix(encrypted, KeyEncryptionPrefix) {
 		return "", errors.New("无效的私钥格式")
 	}
-	// 转换为 Token 加密格式后解密
-	tokenFormat := config.EncryptionPrefix + strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
-	return config.DecryptToken(tokenFormat)
+	// 提取 base64 数据，直接用底层 DecryptToken 解密
+	base64Data := strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
+	return config.DecryptToken(config.EncryptionPrefix + base64Data)
 }
 
 // OrderMeta 订单元数据
@@ -95,7 +96,15 @@ func (s *OrderStore) LoadPrivateKey(orderID int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return DecryptPrivateKey(string(data))
+	keyPEM, err := DecryptPrivateKey(string(data))
+	if err != nil {
+		return "", err
+	}
+	// 验证解密后的数据是有效 PEM 格式
+	if block, _ := pem.Decode([]byte(keyPEM)); block == nil {
+		return "", errors.New("私钥文件可能已损坏")
+	}
+	return keyPEM, nil
 }
 
 // HasPrivateKey 检查订单是否有本地私钥

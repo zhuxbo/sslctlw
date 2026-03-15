@@ -423,6 +423,9 @@ func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) 
 			reason, _ := handleProcessingOrder(certCfg, certData)
 			return nil, "", reason, nil
 		} else if certData.Status == "active" {
+			// 证书已签发，清理之前可能残留的验证文件
+			cleanupValidationFiles(certCfg.Domain)
+
 			// 检查是否需要续签
 			needRenew, skipReason := checkRenewalNeeded(certData, renewDays)
 			if !needRenew {
@@ -788,6 +791,46 @@ func isIPBinding(hostnamePort string) bool {
 		return false
 	}
 	return net.ParseIP(host) != nil
+}
+
+// validationDirs 可能存在验证文件的子目录
+var validationDirs = []string{
+	filepath.Join(".well-known", "acme-challenge"),
+	filepath.Join(".well-known", "pki-validation"),
+}
+
+// cleanupValidationFiles 清理验证文件
+// 在证书签发成功后调用，清理 .well-known/acme-challenge/ 和 .well-known/pki-validation/ 下的验证文件
+func cleanupValidationFiles(domain string) {
+	_, sitePath, err := iis.GetSitePhysicalPathByDomain(domain)
+	if err != nil {
+		return
+	}
+
+	for _, subDir := range validationDirs {
+		dir := filepath.Join(sitePath, subDir)
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				os.Remove(filepath.Join(dir, entry.Name()))
+			}
+		}
+
+		// 尝试删除空目录
+		os.Remove(dir)
+		log.Printf("已清理验证文件: %s", dir)
+	}
+
+	// 尝试删除空的 .well-known 目录
+	os.Remove(filepath.Join(sitePath, ".well-known"))
 }
 
 // removeTempFile 清理临时文件（带重试）

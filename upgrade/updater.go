@@ -214,11 +214,8 @@ func RestartApplication() error {
 		return fmt.Errorf("获取程序路径失败: %w", err)
 	}
 
-	// 启动新进程
+	// 启动新进程（GUI 应用不需要继承 stdio）
 	cmd := exec.Command(exe, os.Args[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("启动新进程失败: %w", err)

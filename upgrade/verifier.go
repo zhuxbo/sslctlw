@@ -28,6 +28,7 @@ const (
 	INVALID_HANDLE_VALUE          = ^uintptr(0)
 	WTD_UI_NONE                   = 2
 	WTD_REVOKE_NONE               = 0
+	WTD_REVOKE_WHOLECHAIN         = 1
 	WTD_CHOICE_FILE               = 1
 	WTD_STATEACTION_VERIFY        = 1
 	WTD_STATEACTION_CLOSE         = 2
@@ -211,7 +212,24 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 }
 
 // verifySignature 使用 WinVerifyTrust 验证签名
+// 先尝试全链吊销检查，失败后降级为不检查吊销（兼容离线环境）
 func (v *AuthenticodeVerifier) verifySignature(filePath string) error {
+	// 先尝试带吊销检查的验证
+	err := v.winVerifyTrust(filePath, WTD_REVOKE_WHOLECHAIN)
+	if err != nil {
+		// 吊销检查失败（可能离线），降级为不检查吊销
+		fallbackErr := v.winVerifyTrust(filePath, WTD_REVOKE_NONE)
+		if fallbackErr != nil {
+			return fallbackErr
+		}
+		// 签名有效但吊销检查失败，记录日志继续
+		fmt.Printf("警告: 证书吊销检查失败（%v），已跳过吊销检查\n", err)
+	}
+	return nil
+}
+
+// winVerifyTrust 调用 WinVerifyTrust API
+func (v *AuthenticodeVerifier) winVerifyTrust(filePath string, revokeCheck uint32) error {
 	filePathPtr, err := syscall.UTF16PtrFromString(filePath)
 	if err != nil {
 		return err
@@ -226,7 +244,7 @@ func (v *AuthenticodeVerifier) verifySignature(filePath string) error {
 	trustData := WINTRUST_DATA{
 		cbStruct:            uint32(unsafe.Sizeof(WINTRUST_DATA{})),
 		dwUIChoice:          WTD_UI_NONE,
-		fdwRevocationChecks: WTD_REVOKE_NONE,
+		fdwRevocationChecks: revokeCheck,
 		dwUnionChoice:       WTD_CHOICE_FILE,
 		pFile:               &fileInfo,
 		dwStateAction:       WTD_STATEACTION_VERIFY,

@@ -34,6 +34,8 @@ func TestDecryptToken_InvalidFormat(t *testing.T) {
 		{"无前缀", "somedata", true},
 		{"错误前缀", "v2:somedata", true},
 		{"无效 base64", EncryptionPrefix + "!!!invalid!!!", true},
+		{"空数据", EncryptionPrefix, true},
+		{"空 padding", EncryptionPrefix + "====", true},
 	}
 
 	for _, tt := range tests {

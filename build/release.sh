@@ -81,7 +81,7 @@ ssh_cmd() {
     local host="$1"
     local port="$2"
     shift 2
-    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=$SSH_TIMEOUT \
+    ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=$SSH_TIMEOUT \
         -p "$port" "$SSH_USER@$host" "$@"
 }
 
@@ -90,7 +90,7 @@ scp_cmd() {
     local host="$2"
     local port="$3"
     local dest="$4"
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=no -P "$port" \
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -P "$port" \
         "$src" "$SSH_USER@$host:$dest"
 }
 

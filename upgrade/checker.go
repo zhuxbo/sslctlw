@@ -332,11 +332,18 @@ func (c *GitHubChecker) GetUpgradePath(ctx context.Context, currentVersion, targ
 	}
 
 	// 构建升级路径 API 地址
-	// 格式: {apiURL}/path?from={currentVersion}&to={targetVersion}
-	// 或者在同一 API 基础上添加查询参数
-	pathURL := strings.TrimSuffix(c.apiURL, "/latest")
-	pathURL = strings.TrimSuffix(pathURL, "/releases")
-	pathURL = fmt.Sprintf("%s/upgrade-path?from=%s&to=%s", pathURL, url.QueryEscape(currentVersion), url.QueryEscape(targetVersion))
+	baseURL, err := url.Parse(c.apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("解析 API URL 失败: %w", err)
+	}
+	baseURL.Path = strings.TrimSuffix(baseURL.Path, "/latest")
+	baseURL.Path = strings.TrimSuffix(baseURL.Path, "/releases")
+	baseURL.Path += "/upgrade-path"
+	q := baseURL.Query()
+	q.Set("from", currentVersion)
+	q.Set("to", targetVersion)
+	baseURL.RawQuery = q.Encode()
+	pathURL := baseURL.String()
 
 	req, err := http.NewRequestWithContext(ctx, "GET", pathURL, nil)
 	if err != nil {

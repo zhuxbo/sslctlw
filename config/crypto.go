@@ -80,6 +80,10 @@ func DecryptToken(encrypted string) (string, error) {
 		return "", errors.New("无效的加密数据")
 	}
 
+	if len(input) == 0 {
+		return "", errors.New("无效的加密数据")
+	}
+
 	inputBlob := dataBlob{
 		cbData: uint32(len(input)),
 		pbData: &input[0],

@@ -1,6 +1,11 @@
 package cert
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
@@ -347,10 +352,19 @@ func TestOrderStore_SaveLoadPrivateKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := &OrderStore{BaseDir: tmpDir}
 
-	testKey := "-----BEGIN TEST KEY-----\nMIItest...\n-----END TEST KEY-----"
+	// 动态生成测试用私钥，避免硬编码私钥触发 secret scanning
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成测试密钥失败: %v", err)
+	}
+	derBytes, err := x509.MarshalECPrivateKey(ecKey)
+	if err != nil {
+		t.Fatalf("编码测试密钥失败: %v", err)
+	}
+	testKey := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: derBytes}))
 
 	// 保存
-	err := store.SavePrivateKey(123, testKey)
+	err = store.SavePrivateKey(123, testKey)
 	if err != nil {
 		t.Fatalf("SavePrivateKey() error = %v", err)
 	}
