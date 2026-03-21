@@ -74,6 +74,15 @@ echo -e "${GREEN}Tests passed.${NC}"
 echo ""
 
 # ========================================
+# 发布构建必须配置 TRUSTED_ORG
+# ========================================
+if [ "$VERSION" != "dev" ] && [ -z "$TRUSTED_ORG" ]; then
+    echo -e "${YELLOW}ERROR: 发布构建必须配置 TRUSTED_ORG（升级签名验证需要）${NC}"
+    echo "  设置方式: build.conf 中添加 TRUSTED_ORG=xxx 或环境变量 UPGRADE_TRUSTED_ORG=xxx"
+    exit 1
+fi
+
+# ========================================
 # 构建
 # ========================================
 LDFLAGS="-X main.version=$VERSION"

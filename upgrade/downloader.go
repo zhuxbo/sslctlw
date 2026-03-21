@@ -12,6 +12,9 @@ import (
 	"time"
 )
 
+// maxDownloadSize 下载文件大小限制 (20MB)
+const maxDownloadSize = 20 << 20
+
 // HTTPDownloader HTTP 文件下载器
 type HTTPDownloader struct {
 	httpClient *http.Client
@@ -92,18 +95,29 @@ func (d *HTTPDownloader) DownloadToWriter(ctx context.Context, downloadURL strin
 
 	total := resp.ContentLength // 可能为 -1
 
-	// 创建进度报告 reader
+	// 检查 Content-Length 是否超出限制
+	if total > maxDownloadSize {
+		return fmt.Errorf("文件大小 %d 字节超出限制 (%d 字节)", total, maxDownloadSize)
+	}
+
+	// 创建进度报告 reader，带大小限制
+	limitedBody := io.LimitReader(resp.Body, maxDownloadSize+1) // +1 用于检测超限
 	reader := &progressReader{
-		reader:     resp.Body,
+		reader:     limitedBody,
 		total:      total,
 		onProgress: onProgress,
 		startTime:  time.Now(),
 	}
 
 	// 复制数据
-	_, err = io.Copy(w, reader)
+	written, err := io.Copy(w, reader)
 	if err != nil {
 		return fmt.Errorf("下载数据失败: %w", err)
+	}
+
+	// 检查是否超出限制（Content-Length 未知时的防护）
+	if written > maxDownloadSize {
+		return fmt.Errorf("下载数据超出大小限制 (%d 字节)", maxDownloadSize)
 	}
 
 	return nil

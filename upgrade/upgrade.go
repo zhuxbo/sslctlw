@@ -199,14 +199,14 @@ func (u *Upgrader) ChainUpgrade(ctx context.Context, path *UpgradePath, confirmF
 
 // downloadStep 下载单个升级步骤
 func (u *Upgrader) downloadStep(ctx context.Context, step UpgradeStep) (string, error) {
-	tempDir := filepath.Join(os.TempDir(), "sslctlw-upgrade")
-	if err := os.MkdirAll(tempDir, 0700); err != nil {
+	tempDir, err := os.MkdirTemp("", "sslctlw-upgrade-*")
+	if err != nil {
 		return "", fmt.Errorf("创建临时目录失败: %w", err)
 	}
 
 	tempPath := filepath.Join(tempDir, fmt.Sprintf("sslctlw-%s.exe", step.Version))
 
-	err := u.Downloader.Download(ctx, step.DownloadURL, tempPath, func(downloaded, total int64, speed float64) {
+	err = u.Downloader.Download(ctx, step.DownloadURL, tempPath, func(downloaded, total int64, speed float64) {
 		percent := float64(0)
 		if total > 0 {
 			percent = float64(downloaded) / float64(total) * 100
@@ -217,6 +217,7 @@ func (u *Upgrader) downloadStep(ctx context.Context, step UpgradeStep) (string, 
 	})
 
 	if err != nil {
+		os.RemoveAll(tempDir)
 		return "", err
 	}
 
@@ -225,9 +226,9 @@ func (u *Upgrader) downloadStep(ctx context.Context, step UpgradeStep) (string, 
 
 // DownloadAndVerify 下载并验证更新
 func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (string, *VerifyResult, error) {
-	// 创建临时目录
-	tempDir := filepath.Join(os.TempDir(), "sslctlw-upgrade")
-	if err := os.MkdirAll(tempDir, 0700); err != nil {
+	// 创建唯一临时目录
+	tempDir, err := os.MkdirTemp("", "sslctlw-upgrade-*")
+	if err != nil {
 		u.updateProgress(StatusFailed, fmt.Sprintf("创建临时目录失败: %v", err), 0, 0, 0)
 		return "", nil, fmt.Errorf("创建临时目录失败: %w", err)
 	}
@@ -237,7 +238,7 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 	// 下载文件
 	u.updateProgress(StatusDownloading, "正在下载更新...", 0, info.FileSize, 0)
 
-	err := u.Downloader.Download(ctx, info.DownloadURL, tempPath, func(downloaded, total int64, speed float64) {
+	err = u.Downloader.Download(ctx, info.DownloadURL, tempPath, func(downloaded, total int64, speed float64) {
 		percent := float64(0)
 		if total > 0 {
 			percent = float64(downloaded) / float64(total) * 100
@@ -248,6 +249,7 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 	})
 
 	if err != nil {
+		os.RemoveAll(tempDir)
 		u.updateProgress(StatusFailed, fmt.Sprintf("下载失败: %v", err), 0, 0, 0)
 		return "", nil, err
 	}
@@ -257,13 +259,13 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 
 	verifyResult, err := u.Verifier.Verify(tempPath, u.Config.GetVerifyConfig())
 	if err != nil {
-		os.Remove(tempPath)
+		os.RemoveAll(tempDir)
 		u.updateProgress(StatusFailed, fmt.Sprintf("验证失败: %v", err), 0, 0, 0)
 		return "", nil, err
 	}
 
 	if !verifyResult.Valid {
-		os.Remove(tempPath)
+		os.RemoveAll(tempDir)
 		u.updateProgress(StatusFailed, fmt.Sprintf("签名无效: %s", verifyResult.Message), 0, 0, 0)
 		return "", verifyResult, fmt.Errorf("签名验证失败: %s", verifyResult.Message)
 	}
