@@ -560,6 +560,16 @@ func (app *AppWindow) runCheckNow() {
 	app.btnCheckNow.Hwnd().EnableWindow(false)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("runCheckNow panic: %v", r)
+				app.mainWnd.UiThread(func() {
+					app.btnCheckNow.Hwnd().EnableWindow(true)
+					app.appendTaskLog(fmt.Sprintf("检测异常: %v", r))
+				})
+			}
+		}()
+
 		// 检查 context 是否已取消
 		select {
 		case <-app.ctx.Done():
@@ -665,6 +675,22 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 	app.loadingMu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("doLoadDataAsync panic: %v", r)
+				app.mainWnd.UiThread(func() {
+					app.loadingMu.Lock()
+					app.loading = false
+					app.loadingMu.Unlock()
+					app.setStatus(fmt.Sprintf("加载异常: %v", r))
+					app.setButtonsEnabled(true)
+					if onComplete != nil {
+						onComplete()
+					}
+				})
+			}
+		}()
+
 		// 检查 context 是否已取消
 		select {
 		case <-app.ctx.Done():
