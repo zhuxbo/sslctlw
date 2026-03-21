@@ -175,9 +175,8 @@ func deploySingleCert(orderID int) error {
 
 	// 创建单证书配置进行部署
 	singleCfg := &config.Config{
-		Certificates:   []config.CertConfig{*certCfg},
-		RenewDaysFetch: cfg.RenewDaysFetch,
-		RenewDaysLocal: cfg.RenewDaysLocal,
+		Certificates: []config.CertConfig{*certCfg},
+		RenewDays:    cfg.RenewDays,
 	}
 	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
 	results := deploy.AutoDeploy(singleCfg, deployer)

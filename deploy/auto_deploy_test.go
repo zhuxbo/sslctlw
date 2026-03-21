@@ -1139,8 +1139,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 		d := NewMockDeployer()
 
 		cfg := &config.Config{
-			RenewDaysFetch: 13,
-			RenewDaysLocal: 15,
+			RenewDays: 13,
 			Certificates: []config.CertConfig{
 				{
 					OrderID: 100,
@@ -1172,8 +1171,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 		d := NewMockDeployer()
 
 		cfg := &config.Config{
-			RenewDaysFetch: 13,
-			RenewDaysLocal: 15,
+			RenewDays: 13,
 			Certificates: []config.CertConfig{
 				{
 					OrderID: 100,

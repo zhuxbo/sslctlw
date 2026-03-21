@@ -2,6 +2,7 @@ package util
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strings"
 )
@@ -23,9 +24,8 @@ func IsTaskExists(taskName string) bool {
 	return strings.Contains(output, taskName)
 }
 
-// CreateTask 创建计划任务
-// intervalHours: 执行间隔（小时）
-func CreateTask(taskName string, intervalHours int) error {
+// CreateTask 创建计划任务（每天一次，随机时间）
+func CreateTask(taskName string) error {
 	// 验证任务名称
 	if err := ValidateTaskName(taskName); err != nil {
 		return fmt.Errorf("无效的任务名称: %w", err)
@@ -43,8 +43,12 @@ func CreateTask(taskName string, intervalHours int) error {
 	// 删除已存在的任务（如果有）
 	DeleteTask(taskName)
 
+	// 随机生成每天执行时间 (00:00 ~ 23:59)
+	startTime := fmt.Sprintf("%02d:%02d", rand.IntN(24), rand.IntN(60))
+
 	// 创建任务
-	// /sc HOURLY /mo N: 每 N 小时执行一次
+	// /sc DAILY: 每天执行一次
+	// /st HH:MM: 随机开始时间
 	// /ru SYSTEM: 以 SYSTEM 账户运行（需要管理员权限）
 	// /rl HIGHEST: 最高权限运行
 	// /f: 强制覆盖
@@ -52,8 +56,8 @@ func CreateTask(taskName string, intervalHours int) error {
 		"/create",
 		"/tn", taskName,
 		"/tr", taskRun,
-		"/sc", "HOURLY",
-		"/mo", fmt.Sprintf("%d", intervalHours),
+		"/sc", "DAILY",
+		"/st", startTime,
 		"/ru", "SYSTEM",
 		"/rl", "HIGHEST",
 		"/f",

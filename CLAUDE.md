@@ -70,6 +70,10 @@ go test -tags=integration ./integration/...      # 集成测试
 | API 接口 | `skills/api/` |
 | 构建发布 | `skills/build-release/` |
 
+## 自定义命令
+
+- `/finish-check` - 收尾检查：编译、vet、测试、GUI/IIS/API 专项检查、diff 审查、风险评估
+
 ## Git 规范
 
 - **不要自动提交**: 修改完成后等待用户确认，不要主动 commit

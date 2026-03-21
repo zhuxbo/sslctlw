@@ -142,7 +142,7 @@ func Run(opts Options, progress ProgressFunc) error {
 	// 6. 创建计划任务
 	report("创建计划任务...")
 	taskName := config.DefaultTaskName
-	if err := createDeployTask(taskName); err != nil {
+	if err := util.CreateTask(taskName); err != nil {
 		log.Printf("创建计划任务失败: %v", err)
 	} else {
 		log.Printf("计划任务已创建: %s", taskName)
@@ -236,35 +236,6 @@ func saveSetupConfig(certConfigs []config.CertConfig) error {
 	return cfg.Save()
 }
 
-// createDeployTask 创建计划任务
-func createDeployTask(taskName string) error {
-	exePath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("获取程序路径失败: %v", err)
-	}
-
-	// 使用 schtasks 创建
-	// 先删除已有的
-	util.DeleteTask(taskName)
-
-	// CreateTask 内部使用 -auto 命令，需要更新为 deploy --all
-	// 直接用 schtasks 创建
-	output, err := util.RunCmdCombined("schtasks",
-		"/create",
-		"/tn", taskName,
-		"/tr", fmt.Sprintf("\"%s\" deploy --all", exePath),
-		"/sc", "HOURLY",
-		"/mo", fmt.Sprintf("%d", config.DefaultCheckInterval),
-		"/ru", "SYSTEM",
-		"/rl", "HIGHEST",
-		"/f",
-	)
-	if err != nil {
-		return fmt.Errorf("创建任务失败: %v, 输出: %s", err, output)
-	}
-
-	return nil
-}
 
 // RunCLI 从命令行参数执行 setup（CLI 入口）
 func RunCLI(args []string) error {

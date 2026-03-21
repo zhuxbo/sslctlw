@@ -196,11 +196,11 @@ client.Callback(&api.CallbackRequest{
 查询 OrderID 对应证书
 ├─ 失败 → 跳过（下次重试）
 ├─ status != active → 跳过
-├─ 剩余天数 > RenewDaysFetch(13) → 跳过，等待服务端自动续签
-└─ 剩余天数 <= RenewDaysFetch(13) → 拉取 API 私钥 + 证书 → 部署
+├─ 剩余天数 > RenewDays(13) → 跳过，未到续签时间
+└─ 剩余天数 <= RenewDays(13) → 拉取 API 私钥 + 证书 → 部署
 ```
 
-**设计意图**：服务端 14 天自动续签，客户端 13 天开始拉取，确保拿到新证书。
+**设计意图**：到期前 13 天开始拉取新证书。
 
 ### 本机提交模式（UseLocalKey = true）
 
@@ -209,8 +209,8 @@ client.Callback(&api.CallbackRequest{
 ├─ 是 → 查询订单状态
 │   ├─ processing → 跳过，等待签发
 │   ├─ active → 检查续签时机
-│   │   ├─ 剩余天数 > RenewDaysLocal(15) → 跳过，未到续签时间
-│   │   └─ 剩余天数 <= RenewDaysLocal(15) → 检查本地私钥
+│   │   ├─ 剩余天数 > RenewDays(13) → 跳过，未到续签时间
+│   │   └─ 剩余天数 <= RenewDays(13) → 检查本地私钥
 │   │       ├─ 有私钥且匹配 → 部署证书
 │   │       ├─ 有私钥不匹配 → 删除私钥，生成新 CSR 提交
 │   │       └─ 无私钥但 API 返回私钥 → 使用 API 私钥部署
@@ -218,7 +218,7 @@ client.Callback(&api.CallbackRequest{
 └─ 否 → 生成新 CSR 提交
 ```
 
-**设计意图**：客户端 15 天发起续签，抢在服务端 14 天自动续签之前，确保使用本地私钥。
+**设计意图**：到期前 13 天发起续签，确保使用本地私钥。
 
 **重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
@@ -281,7 +281,7 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 
 ### 定时任务重试（延迟）
 
-定时任务每 `CheckInterval`（默认 6）小时运行一次，失败的证书下次自动重试：
+定时任务每天运行一次，失败的证书下次自动重试：
 
 | 失败点 | HTTP 层 | 定时任务层 |
 |--------|---------|-----------|

@@ -17,14 +17,8 @@ const (
 	// DataDirName 数据目录名称
 	DataDirName = "sslctlw"
 
-	// DefaultRenewDaysLocal 本机提交：到期前多少天发起续签
-	DefaultRenewDaysLocal = 15
-
-	// DefaultRenewDaysFetch 自动签发：到期前多少天开始拉取
-	DefaultRenewDaysFetch = 13
-
-	// DefaultCheckInterval 默认检测间隔（小时）
-	DefaultCheckInterval = 6
+	// DefaultRenewDays 提前续签天数（两种模式统一）
+	DefaultRenewDays = 13
 
 	// DefaultTaskName 默认任务计划名称
 	DefaultTaskName = "SSLCtlW"
@@ -84,11 +78,9 @@ type CertConfig struct {
 // Config 应用配置
 type Config struct {
 	Certificates     []CertConfig `json:"certificates"`              // 证书配置
-	RenewDaysLocal   int          `json:"renew_days_local"`          // 本机提交：到期前多少天发起续签（默认15）
-	RenewDaysFetch   int          `json:"renew_days_fetch"`          // 自动签发：到期前多少天开始拉取（默认13）
+	RenewDays        int          `json:"renew_days"`                // 提前续签天数（默认13）
 	LastCheck        string       `json:"last_check"`                // 上次检查时间
 	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
-	CheckInterval    int          `json:"check_interval"`            // 检测间隔（小时），默认6
 	TaskName         string       `json:"task_name"`                 // 任务计划名称
 	IIS7Mode         bool         `json:"iis7_mode"`                 // IIS7 兼容模式（自动检测）
 
@@ -105,10 +97,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Certificates:     []CertConfig{},
-		RenewDaysLocal:   DefaultRenewDaysLocal,
-		RenewDaysFetch:   DefaultRenewDaysFetch,
+		RenewDays:        DefaultRenewDays,
 		AutoCheckEnabled: false,
-		CheckInterval:    DefaultCheckInterval,
 		TaskName:         DefaultTaskName,
 		IIS7Mode:         false,
 		// 升级配置默认值
@@ -183,15 +173,8 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	// 设置默认值（不设置 APIBaseURL 和 Token 的默认值，由用户配置）
-	if cfg.RenewDaysLocal == 0 {
-		cfg.RenewDaysLocal = DefaultRenewDaysLocal
-	}
-	if cfg.RenewDaysFetch == 0 {
-		cfg.RenewDaysFetch = DefaultRenewDaysFetch
-	}
-	if cfg.CheckInterval == 0 {
-		cfg.CheckInterval = DefaultCheckInterval
+	if cfg.RenewDays == 0 {
+		cfg.RenewDays = DefaultRenewDays
 	}
 	if cfg.TaskName == "" {
 		cfg.TaskName = DefaultTaskName

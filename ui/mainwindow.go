@@ -524,12 +524,7 @@ func (app *AppWindow) toggleAutoCheck() {
 				return
 			}
 
-			interval := cfg.CheckInterval
-			if interval <= 0 {
-				interval = 6
-			}
-
-			err := util.CreateTask(taskName, interval)
+			err := util.CreateTask(taskName)
 
 			app.mainWnd.UiThread(func() {
 				app.btnAutoCheck.Hwnd().EnableWindow(true)
@@ -547,8 +542,8 @@ func (app *AppWindow) toggleAutoCheck() {
 
 				app.btnAutoCheck.SetText("停止自动部署")
 				app.statusIndicator.SetState(IndicatorRunning)
-				app.lblTaskStatus.Hwnd().SetWindowText(fmt.Sprintf("状态: 任务计划运行中 (每 %d 小时)", interval))
-				app.appendTaskLog(fmt.Sprintf("自动部署已启动，每 %d 小时检查一次", interval))
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划运行中 (每天一次)")
+				app.appendTaskLog("自动部署已启动，每天检查一次")
 				app.appendTaskLog("任务计划已创建: " + taskName)
 			})
 		}

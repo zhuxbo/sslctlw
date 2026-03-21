@@ -76,10 +76,9 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		var err error
 
 		if certCfg.UseLocalKey {
-			// 本机提交：到期前 > RenewDaysLocal 天发起续签
-			// 目的：抢在服务端自动续签（14天）之前，由本地发起 CSR
+			// 本机提交：到期前 <= RenewDays 天发起续签
 			var reason string
-			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.RenewDaysLocal)
+			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.RenewDays)
 			if err != nil {
 				log.Printf("本机提交处理失败: %v", err)
 				results = append(results, Result{
@@ -97,8 +96,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 				continue
 			}
 		} else {
-			// 自动签发：到期前 < RenewDaysFetch 天开始拉取
-			// 目的：等服务端自动续签（14天）完成后再拉取
+			// 自动签发：到期前 <= RenewDays 天开始拉取
 			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
 			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
 			cancel()
@@ -125,7 +123,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 				continue
 			}
 
-			// 自动签发：检查是否到了拉取时间
+			// 检查是否到了拉取时间
 			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 			if err != nil {
 				log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
@@ -133,8 +131,8 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 			}
 
 			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
-			if daysUntilExpiry > cfg.RenewDaysFetch {
-				log.Printf("证书 %s 还有 %d 天过期，等待服务端续签（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.RenewDaysFetch)
+			if daysUntilExpiry > cfg.RenewDays {
+				log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.RenewDays)
 				continue
 			}
 
