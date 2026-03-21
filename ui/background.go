@@ -1,15 +1,18 @@
 package ui
 
 import (
+	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
 
-	"cert-deploy/api"
-	"cert-deploy/cert"
-	"cert-deploy/config"
-	"cert-deploy/deploy"
-	"cert-deploy/iis"
+	"sslctlw/api"
+	"sslctlw/cert"
+	"sslctlw/config"
+	"sslctlw/deploy"
+	"sslctlw/iis"
 )
 
 // TaskStatus 任务状态
@@ -31,7 +34,10 @@ type BackgroundTask struct {
 	nextRun      time.Time
 	interval     time.Duration
 	running      bool
+	checkMu      sync.Mutex
+	checking     bool
 	stopChan     chan struct{}
+	resetChan    chan struct{} // 通知 runLoop 重建 ticker
 	onUpdate     func()
 	results      []deploy.Result
 	checkEnabled bool
@@ -44,6 +50,7 @@ func NewBackgroundTask() *BackgroundTask {
 		message:      "未启动",
 		interval:     1 * time.Hour, // 默认每小时检查一次
 		stopChan:     make(chan struct{}),
+		resetChan:    make(chan struct{}, 1),
 		checkEnabled: false,
 	}
 }
@@ -51,10 +58,18 @@ func NewBackgroundTask() *BackgroundTask {
 // SetInterval 设置检查间隔
 func (t *BackgroundTask) SetInterval(d time.Duration) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.interval = d
-	if t.running {
+	running := t.running
+	if running {
 		t.nextRun = time.Now().Add(d)
+	}
+	t.mu.Unlock()
+	// 通知 runLoop 重建 ticker
+	if running {
+		select {
+		case t.resetChan <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -75,6 +90,7 @@ func (t *BackgroundTask) Start() {
 	t.running = true
 	t.checkEnabled = true
 	t.stopChan = make(chan struct{})
+	t.resetChan = make(chan struct{}, 1)
 	t.mu.Unlock()
 
 	go t.runLoop()
@@ -166,6 +182,13 @@ func (t *BackgroundTask) runLoop() {
 		select {
 		case <-t.stopChan:
 			return
+		case <-t.resetChan:
+			// 间隔已变更，重建 ticker
+			ticker.Stop()
+			t.mu.Lock()
+			interval = t.interval
+			t.mu.Unlock()
+			ticker = time.NewTicker(interval)
 		case <-ticker.C:
 			t.doCheck()
 			t.mu.Lock()
@@ -177,6 +200,18 @@ func (t *BackgroundTask) runLoop() {
 
 // doCheck 执行检查
 func (t *BackgroundTask) doCheck() {
+	if !t.tryStartCheck() {
+		return
+	}
+	defer t.endCheck()
+
+	// 防止底层调用链中的 panic 导致整个程序崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			t.updateStatus(TaskStatusFailed, fmt.Sprintf("内部错误: %v", r))
+		}
+	}()
+
 	t.updateStatus(TaskStatusRunning, "正在检测证书...")
 
 	cfg, err := config.Load()
@@ -192,7 +227,8 @@ func (t *BackgroundTask) doCheck() {
 
 	t.updateStatus(TaskStatusRunning, fmt.Sprintf("正在检查 %d 个证书...", len(cfg.Certificates)))
 
-	results := deploy.AutoDeploy(cfg)
+	store := cert.NewOrderStore()
+	results := deploy.AutoDeploy(cfg, deploy.DefaultDeployer(cfg, store))
 
 	t.mu.Lock()
 	t.lastRun = time.Now()
@@ -237,23 +273,44 @@ func (t *BackgroundTask) updateStatus(status TaskStatus, message string) {
 	}
 }
 
+func (t *BackgroundTask) tryStartCheck() bool {
+	t.checkMu.Lock()
+	defer t.checkMu.Unlock()
+	if t.checking {
+		return false
+	}
+	t.checking = true
+	return true
+}
+
+func (t *BackgroundTask) endCheck() {
+	t.checkMu.Lock()
+	t.checking = false
+	t.checkMu.Unlock()
+}
+
 // CheckCertExpiry 检查证书过期情况（不自动部署，仅检查）
 func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 	results := make([]CertExpiryInfo, 0)
-
-	token := cfg.GetToken()
-	if token == "" {
-		return results
-	}
-
-	client := api.NewClient(cfg.APIBaseURL, token)
 
 	for _, certCfg := range cfg.Certificates {
 		if !certCfg.Enabled {
 			continue
 		}
 
-		certData, err := client.GetCertByOrderID(certCfg.OrderID)
+		token := certCfg.API.GetToken()
+		if token == "" || certCfg.API.URL == "" {
+			results = append(results, CertExpiryInfo{
+				Domain: certCfg.Domain,
+				Error:  "未配置 API",
+			})
+			continue
+		}
+
+		client := api.NewClient(certCfg.API.URL, token)
+		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
+		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
+		cancel()
 		if err != nil {
 			results = append(results, CertExpiryInfo{
 				Domain: certCfg.Domain,
@@ -267,7 +324,7 @@ func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 
 		results = append(results, CertExpiryInfo{
 			Domain:    certCfg.Domain,
-			CertName:  certData.Domain,
+			CertName:  certData.Domain(),
 			ExpiresAt: expiresAt,
 			DaysLeft:  daysLeft,
 			Status:    certData.Status,
@@ -296,10 +353,13 @@ func CheckLocalCerts() []LocalCertInfo {
 		return results
 	}
 
-	sslBindings, _ := iis.ListSSLBindings()
+	sslBindings, sslErr := iis.ListSSLBindings()
+	if sslErr != nil {
+		log.Printf("警告: 加载 SSL 绑定列表失败: %v", sslErr)
+	}
 	boundCerts := make(map[string]bool)
 	for _, b := range sslBindings {
-		boundCerts[b.CertHash] = true
+		boundCerts[strings.ToUpper(b.CertHash)] = true
 	}
 
 	for _, c := range certs {

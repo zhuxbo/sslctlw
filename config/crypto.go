@@ -2,8 +2,19 @@ package config
 
 import (
 	"encoding/base64"
+	"errors"
+	"strings"
 	"syscall"
 	"unsafe"
+)
+
+// EncryptionPrefix 加密版本前缀
+const EncryptionPrefix = "v1:"
+
+// DPAPI 标志常量
+const (
+	// CRYPTPROTECT_UI_FORBIDDEN 禁止在加密/解密过程中显示 UI
+	cryptprotectUIForbidden = 0x1
 )
 
 var (
@@ -35,8 +46,11 @@ func EncryptToken(plaintext string) (string, error) {
 	var outputBlob dataBlob
 	r, _, err := procEncryptData.Call(
 		uintptr(unsafe.Pointer(&inputBlob)),
-		0, 0, 0, 0,
-		0,
+		0,                           // szDataDescr (可选描述)
+		0,                           // pOptionalEntropy (可选熵)
+		0,                           // pvReserved (保留)
+		0,                           // pPromptStruct (提示结构)
+		cryptprotectUIForbidden,     // dwFlags - 禁止 UI 弹窗
 		uintptr(unsafe.Pointer(&outputBlob)),
 	)
 	if r == 0 {
@@ -47,7 +61,7 @@ func EncryptToken(plaintext string) (string, error) {
 	output := make([]byte, outputBlob.cbData)
 	copy(output, unsafe.Slice(outputBlob.pbData, outputBlob.cbData))
 
-	return base64.StdEncoding.EncodeToString(output), nil
+	return EncryptionPrefix + base64.StdEncoding.EncodeToString(output), nil
 }
 
 // DecryptToken 使用 DPAPI 解密 Token
@@ -56,10 +70,18 @@ func DecryptToken(encrypted string) (string, error) {
 		return "", nil
 	}
 
-	input, err := base64.StdEncoding.DecodeString(encrypted)
+	if !strings.HasPrefix(encrypted, EncryptionPrefix) {
+		return "", errors.New("无效的加密格式")
+	}
+
+	data := strings.TrimPrefix(encrypted, EncryptionPrefix)
+	input, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
-		// 可能是旧版明文 Token，直接返回
-		return encrypted, nil
+		return "", errors.New("无效的加密数据")
+	}
+
+	if len(input) == 0 {
+		return "", errors.New("无效的加密数据")
 	}
 
 	inputBlob := dataBlob{
@@ -70,17 +92,26 @@ func DecryptToken(encrypted string) (string, error) {
 	var outputBlob dataBlob
 	r, _, err := procDecryptData.Call(
 		uintptr(unsafe.Pointer(&inputBlob)),
-		0, 0, 0, 0, 0,
+		0,                           // ppszDataDescr (输出描述)
+		0,                           // pOptionalEntropy (可选熵)
+		0,                           // pvReserved (保留)
+		0,                           // pPromptStruct (提示结构)
+		cryptprotectUIForbidden,     // dwFlags - 禁止 UI 弹窗
 		uintptr(unsafe.Pointer(&outputBlob)),
 	)
 	if r == 0 {
-		// 解密失败，可能是明文 Token
-		return encrypted, nil
+		return "", errors.New("解密失败")
 	}
 	defer procLocalFree.Call(uintptr(unsafe.Pointer(outputBlob.pbData)))
 
 	output := make([]byte, outputBlob.cbData)
 	copy(output, unsafe.Slice(outputBlob.pbData, outputBlob.cbData))
+	result := string(output)
 
-	return string(output), nil
+	// 清零中间 byte slice，减少内存中明文残留
+	for i := range output {
+		output[i] = 0
+	}
+
+	return result, nil
 }

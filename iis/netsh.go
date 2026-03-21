@@ -3,10 +3,11 @@ package iis
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 
-	"cert-deploy/util"
+	"sslctlw/util"
 )
 
 // 默认 AppID (用于标识应用程序)
@@ -19,6 +20,7 @@ type SSLBinding struct {
 	AppID           string
 	CertStoreName   string
 	SslCtlStoreName string
+	IsIPBinding     bool // true: IP:port 绑定（空主机名），false: Hostname:port 绑定（SNI）
 }
 
 // BindCertificate 绑定证书到指定的主机名和端口 (SNI 模式)
@@ -28,7 +30,7 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	}
 
 	// 参数验证
-	if err := util.ValidateHostname(hostname); err != nil {
+	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
@@ -67,15 +69,16 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	// 验证绑定是否真正成功
 	binding, verifyErr := GetBindingForHost(hostname, port)
 	if verifyErr != nil {
-		// 验证失败但命令成功，给出警告而非错误
 		if isSuccess {
-			return nil // 命令报告成功，信任它
+			log.Printf("警告: SNI 绑定 %s:%d 命令成功但验证查询失败: %v", hostname, port, verifyErr)
+			return fmt.Errorf("绑定命令成功但验证查询失败: %v", verifyErr)
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
-			return nil // 命令报告成功，可能是解析问题
+			log.Printf("警告: SNI 绑定 %s:%d 命令成功但未找到绑定记录", hostname, port)
+			return fmt.Errorf("绑定命令成功但未找到绑定记录（可能是解析问题）")
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
 	}
@@ -136,13 +139,15 @@ func BindCertificateByIP(ip string, port int, certHash string) error {
 	binding, verifyErr := GetBindingForIP(ip, port)
 	if verifyErr != nil {
 		if isSuccess {
-			return nil
+			log.Printf("警告: IP 绑定 %s:%d 命令成功但验证查询失败: %v", ip, port, verifyErr)
+			return fmt.Errorf("绑定命令成功但验证查询失败: %v", verifyErr)
 		}
 		return fmt.Errorf("绑定后验证失败: %v", verifyErr)
 	}
 	if binding == nil {
 		if isSuccess {
-			return nil
+			log.Printf("警告: IP 绑定 %s:%d 命令成功但未找到绑定记录", ip, port)
+			return fmt.Errorf("绑定命令成功但未找到绑定记录（可能是解析问题）")
 		}
 		return fmt.Errorf("绑定未生效: 未找到绑定记录，输出: %s", output)
 	}
@@ -160,7 +165,7 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	// 参数验证
-	if err := util.ValidateHostname(hostname); err != nil {
+	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}
 	if err := util.ValidatePort(port); err != nil {
@@ -216,16 +221,20 @@ func ListSSLBindings() ([]SSLBinding, error) {
 	return parseSSLBindings(output), nil
 }
 
+// netsh 输出解析正则（支持中英文和全角/半角冒号）
+var (
+	// SNI 绑定: "Hostname:port", "主机名:端口"
+	sniBindingRe = regexp.MustCompile(`(?i)(?:Hostname:port|主机名[:：]端口)\s*[:：]\s*(.+)`)
+	// IP 绑定: "IP:port", "IP:端口"（空主机名，用于通配符泛匹配或 IP 证书）
+	ipBindingRe = regexp.MustCompile(`(?i)(?:IP:port|IP[:：]端口)\s*[:：]\s*(.+)`)
+	certHashRe  = regexp.MustCompile(`(?i)(?:Certificate Hash|证书哈希)\s*[:：]\s*([a-fA-F0-9]+)`)
+	appIDRe     = regexp.MustCompile(`(?i)(?:Application ID|应用程序\s*ID)\s*[:：]\s*(\{[^}]+\})`)
+	storeRe     = regexp.MustCompile(`(?i)(?:Certificate Store Name|证书存储名称)\s*[:：]\s*(.+)`)
+)
+
 // parseSSLBindings 解析 netsh 输出
 func parseSSLBindings(output string) []SSLBinding {
 	bindings := make([]SSLBinding, 0)
-
-	// 正则表达式匹配（支持中英文和全角/半角冒号）
-	// 匹配: "Hostname:port", "IP:port", "主机名:端口", "IP:端口" 等
-	hostPortRe := regexp.MustCompile(`(?i)(?:Hostname:port|IP:port|主机名[:：]端口|IP[:：]端口)\s*[:：]\s*(.+)`)
-	certHashRe := regexp.MustCompile(`(?i)(?:Certificate Hash|证书哈希)\s*[:：]\s*([a-fA-F0-9]+)`)
-	appIDRe := regexp.MustCompile(`(?i)(?:Application ID|应用程序\s*ID)\s*[:：]\s*(\{[^}]+\})`)
-	storeRe := regexp.MustCompile(`(?i)(?:Certificate Store Name|证书存储名称)\s*[:：]\s*(.+)`)
 
 	var current *SSLBinding
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -236,13 +245,25 @@ func parseSSLBindings(output string) []SSLBinding {
 			continue
 		}
 
-		// 检查是否是新的绑定条目
-		if matches := hostPortRe.FindStringSubmatch(line); matches != nil {
+		// 检查是否是新的绑定条目（优先检查 SNI 绑定）
+		if matches := sniBindingRe.FindStringSubmatch(line); matches != nil {
 			if current != nil {
 				bindings = append(bindings, *current)
 			}
 			current = &SSLBinding{
 				HostnamePort: strings.TrimSpace(matches[1]),
+				IsIPBinding:  false,
+			}
+			continue
+		}
+		// 检查 IP 绑定（空主机名）
+		if matches := ipBindingRe.FindStringSubmatch(line); matches != nil {
+			if current != nil {
+				bindings = append(bindings, *current)
+			}
+			current = &SSLBinding{
+				HostnamePort: strings.TrimSpace(matches[1]),
+				IsIPBinding:  true,
 			}
 			continue
 		}
@@ -314,29 +335,38 @@ func GetBindingForIP(ip string, port int) (*SSLBinding, error) {
 	return nil, nil // 未找到
 }
 
-// FindBindingsForDomains 查找与指定域名匹配的 SSL 绑定
-// 返回: 实际绑定域名 -> SSLBinding 映射（通配符会匹配多个）
-func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
-	bindings, err := ListSSLBindings()
-	if err != nil {
-		return nil, err
-	}
-
+// findBindingsFromList 从绑定列表中查找匹配指定域名的 SNI 绑定（纯函数，便于测试）
+func findBindingsFromList(bindings []SSLBinding, domains []string) map[string]*SSLBinding {
 	result := make(map[string]*SSLBinding)
 	for i, b := range bindings {
+		if b.IsIPBinding {
+			continue
+		}
+
 		host := ParseHostFromBinding(b.HostnamePort)
 		if host == "" {
 			continue
 		}
-		// 检查绑定域名是否匹配任意证书域名（包括通配符匹配）
 		for _, certDomain := range domains {
-			if matchDomain(host, certDomain) {
+			if util.MatchDomain(host, certDomain) {
 				result[host] = &bindings[i]
 				break
 			}
 		}
 	}
-	return result, nil
+	return result
+}
+
+// FindBindingsForDomains 查找与指定域名匹配的 SNI 绑定
+// 返回: 绑定域名 -> SSLBinding 映射
+// 注意: 只匹配 SNI 绑定（Hostname:port），忽略 IP 绑定（空主机名）
+// IP 绑定用于通配符泛匹配或 IP 证书，需用户手工管理
+func FindBindingsForDomains(domains []string) (map[string]*SSLBinding, error) {
+	bindings, err := ListSSLBindings()
+	if err != nil {
+		return nil, err
+	}
+	return findBindingsFromList(bindings, domains), nil
 }
 
 // ParseHostFromBinding 从 "hostname:port" 提取主机名
@@ -360,29 +390,4 @@ func ParsePortFromBinding(hostnamePort string) int {
 		}
 	}
 	return 443
-}
-
-// matchDomain 检查绑定是否匹配域名（支持通配符）
-func matchDomain(bindingHost, certDomain string) bool {
-	bindingHost = strings.ToLower(bindingHost)
-	certDomain = strings.ToLower(certDomain)
-
-	// 精确匹配
-	if bindingHost == certDomain {
-		return true
-	}
-
-	// 通配符证书匹配: *.example.com 匹配 www.example.com
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // ".example.com"
-		if strings.HasSuffix(bindingHost, suffix) {
-			// 确保只有一级子域名
-			prefix := bindingHost[:len(bindingHost)-len(suffix)]
-			if !strings.Contains(prefix, ".") {
-				return true
-			}
-		}
-	}
-
-	return false
 }

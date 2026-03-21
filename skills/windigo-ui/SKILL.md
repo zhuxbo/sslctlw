@@ -91,13 +91,48 @@ cmb := ui.NewComboBox(parent,
         Position(ui.Dpi(100, 20)).
         Width(ui.DpiX(200)).
         Texts("选项1", "选项2").
-        CtrlStyle(co.CBS_DROPDOWNLIST),
+        CtrlStyle(co.CBS_DROPDOWNLIST),  // 只读下拉列表
+        // 或 co.CBS_DROPDOWN 可编辑下拉框
 )
 
+// 选择变化事件
 cmb.On().CbnSelChange(func() {
-    idx := cmb.Items.Selected()
+    idx := cmb.Items.Selected()  // 使用索引，不要用 Text()
+})
+
+// 编辑变化事件（仅 CBS_DROPDOWN）
+cmb.On().CbnEditChange(func() {
+    text := cmb.Text()  // 编辑事件中可用 Text()
 })
 ```
+
+**CbnSelChange 时序问题**: 在 `CbnSelChange` 事件中，`cmb.Text()` 可能还未更新为新选中项的文本。如果需要在事件处理函数中调用其他函数并传递选中的值：
+
+```go
+// 错误示范：被调用函数内部读取 cmb.Text()
+updateDisplay := func() {
+    domain := cmb.Text()  // CbnSelChange 时可能还是旧值！
+    doSomething(domain)
+}
+cmb.On().CbnSelChange(func() {
+    updateDisplay()  // 可能显示旧值
+})
+
+// 正确做法：将选中值作为参数传递
+updateDisplay := func(domain string) {
+    doSomething(domain)  // 使用传入的值
+}
+cmb.On().CbnSelChange(func() {
+    idx := cmb.Items.Selected()
+    if idx >= 0 && idx < len(itemList) {
+        updateDisplay(itemList[idx])  // 通过索引获取并传递
+    }
+})
+```
+
+**重要**: ComboBox 样式说明：
+- `CBS_DROPDOWNLIST`: 只读下拉列表，用户只能从列表选择
+- `CBS_DROPDOWN`: 可编辑下拉框，用户可以输入自定义文本
 
 ### 编辑框
 
@@ -316,7 +351,7 @@ btn.Hwnd().EnableWindow(true)   // 启用
 运行程序时添加 `-debug` 参数启用调试模式，会输出详细日志到 `debug.log`：
 
 ```
-certdeploy.exe -debug
+sslctlw.exe -debug
 ```
 
 ### Static 没有 SetText
@@ -330,3 +365,136 @@ certdeploy.exe -debug
 ### 隐藏控制台
 
 编译时加 `-ldflags="-H windowsgui"`
+
+### ComboBox CbnSelChange 事件时序问题（重要）
+
+**问题**: 在可编辑 ComboBox（`CBS_DROPDOWN`）的 `CbnSelChange` 事件中，`cmb.Text()` 返回的可能是**旧值**，因为编辑框文本尚未更新。
+
+**症状**: 第一次选择某个选项时，关联组件显示不正确；再次选择同一选项才正常。
+
+**原因**: Windows ComboBox 在 `CBN_SELCHANGE` 消息触发时，选中索引已更新，但编辑框文本可能延迟更新。
+
+**错误示例**:
+```go
+// ❌ 错误：CbnSelChange 中使用 Text()
+cmbDomain.On().CbnSelChange(func() {
+    domain := cmbDomain.Text()  // 可能是旧值！
+    updateList(domain)
+})
+```
+
+**正确方案**: 使用索引从原始数据获取值：
+```go
+// ✓ 正确：通过索引获取
+domainList := []string{"a.com", "b.com", "c.com"}
+
+cmbDomain.On().CbnSelChange(func() {
+    idx := cmbDomain.Items.Selected()
+    if idx >= 0 && idx < len(domainList) {
+        domain := domainList[idx]  // 从原始列表获取
+        updateList(domain)
+    }
+})
+
+// CbnEditChange 事件中可以用 Text()（用户手动编辑时）
+cmbDomain.On().CbnEditChange(func() {
+    domain := cmbDomain.Text()  // 这里是正确的
+    updateList(domain)
+})
+```
+
+**适用场景**: 仅影响 `CBS_DROPDOWN`（可编辑）样式。`CBS_DROPDOWNLIST`（只读）通常不受影响，但建议也使用索引方式。
+
+### Dialog 级别 Context 取消模式
+
+对话框中启动的 goroutine 必须在对话框关闭时终止，否则会在关闭后继续运行（访问已释放的 UI 控件导致崩溃）。
+
+```go
+func ShowDialog(owner ui.Parent) {
+    dlgCtx, dlgCancel := context.WithCancel(context.Background())
+
+    dlg := ui.NewModal(owner, ...)
+
+    dlg.On().WmDestroy(func() {
+        dlgCancel() // 关闭时取消所有 goroutine
+    })
+
+    go func() {
+        result, err := apiClient.Fetch(dlgCtx, ...) // 传入 dlgCtx
+        if dlgCtx.Err() != nil {
+            return // 对话框已关闭，不再更新 UI
+        }
+        dlg.UiThread(func() {
+            // 更新 UI...
+        })
+    }()
+
+    dlg.ShowModal()
+}
+```
+
+**适用文件**: `dialogs_api.go`、`dialogs_bind.go`、`dialogs_install.go`
+
+### SetOnUpdate(nil) 必须使用 defer
+
+暂停后台任务回调后，必须用 `defer` 确保恢复，否则异常路径会永久禁用回调：
+
+```go
+// ✓ 正确：使用 withPausedTaskUpdate 辅助方法
+func (app *AppWindow) withPausedTaskUpdate(fn func()) {
+    app.bgTask.SetOnUpdate(nil)
+    defer app.bgTask.SetOnUpdate(func() {
+        app.mainWnd.UiThread(func() { app.updateTaskStatus() })
+    })
+    fn()
+}
+
+// ❌ 错误：手动恢复，对话框 panic 时不会执行
+app.bgTask.SetOnUpdate(nil)
+ShowDialog(...)
+app.bgTask.SetOnUpdate(callback) // 如果 ShowDialog panic，这行不执行
+```
+
+### LogBuffer 线程安全要求
+
+`LogBuffer` 的 `Append`/`Clear`/`GetLines` 等方法会被 goroutine 和 UI 线程同时调用，必须使用 `sync.Mutex` 保护。注意 UI 操作（`SendMessage`）必须放在锁外，避免死锁。
+
+### doLoadDataAsync onComplete 回调契约
+
+`doLoadDataAsync` 的 `onComplete` 回调**必须在所有路径上调用**，包括 `loading == true` 提前返回的路径。否则调用方的按钮可能永久禁用：
+
+```go
+if app.loading {
+    app.loadingMu.Unlock()
+    if onComplete != nil {
+        onComplete() // 即使跳过加载，也要通知调用方
+    }
+    return
+}
+```
+
+### ComboBox 下拉列表刷新问题
+
+**问题**: 动态更新 ComboBox 项目后，下拉列表可能显示旧内容。
+
+**解决**: 更新前关闭下拉列表：
+```go
+const CB_SHOWDROPDOWN = 0x014F
+
+// 更新前关闭下拉列表
+cmbCert.Hwnd().SendMessage(CB_SHOWDROPDOWN, 0, 0)
+
+// 清空并重新添加
+cmbCert.Items.DeleteAll()
+for _, item := range items {
+    cmbCert.Items.Add(item)
+}
+
+// 强制重绘
+cmbCert.Hwnd().InvalidateRect(nil, true)
+
+// 选择第一项
+if len(items) > 0 {
+    cmbCert.Items.Select(0)
+}
+```

@@ -3,12 +3,50 @@ package cert
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"regexp"
 	"strings"
 	"time"
 
-	"cert-deploy/util"
+	"sslctlw/util"
 )
+
+// parseTimeMultiFormat 尝试多种日期格式解析时间字符串
+// 非英文 Windows 的 PowerShell 可能输出不同的日期格式
+func parseTimeMultiFormat(value string) time.Time {
+	type layout struct {
+		format string
+		local  bool
+	}
+	formats := []layout{
+		{"2006-01-02 15:04:05", true},        // ISO 格式 (PowerShell ToString 指定)
+		{"2006/01/02 15:04:05", true},        // 斜杠格式
+		{"01/02/2006 15:04:05", true},        // US 格式 (MM/DD/YYYY)
+		{"02/01/2006 15:04:05", true},        // GB 格式 (DD/MM/YYYY)
+		{"1/2/2006 15:04:05", true},          // US 短格式
+		{"2/1/2006 15:04:05", true},          // GB 短格式
+		{"1/2/2006 3:04:05 PM", true},        // US 12小时格式
+		{"2006-01-02T15:04:05", true},        // ISO 8601 (无时区，按本地时间)
+		{"2006-01-02T15:04:05Z07:00", false}, // ISO 8601 with timezone
+		{"2006-01-02", true},                 // 仅日期
+	}
+	for _, f := range formats {
+		var (
+			t   time.Time
+			err error
+		)
+		if f.local {
+			t, err = time.ParseInLocation(f.format, value, time.Local)
+		} else {
+			t, err = time.Parse(f.format, value)
+		}
+		if err == nil {
+			return t
+		}
+	}
+	log.Printf("警告: 无法解析日期 %q，所有格式均失败", value)
+	return time.Time{}
+}
 
 // CertInfo 证书信息
 type CertInfo struct {
@@ -38,11 +76,12 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
     Write-Output "FriendlyName: $($cert.FriendlyName)"
     Write-Output "HasPrivateKey: $($cert.HasPrivateKey)"
     Write-Output "SerialNumber: $($cert.SerialNumber)"
-    # 获取 SAN 中的 DNS 名称
+    # 获取 SAN 中的 DNS 名称（支持多种格式：DNS Name=, DNS:, DNS 名称=）
     $san = $cert.Extensions | Where-Object { $_.Oid.Value -eq "2.5.29.17" }
     if ($san) {
         $sanStr = $san.Format($false)
-        $dnsNames = [regex]::Matches($sanStr, 'DNS Name=([^\s,]+)') | ForEach-Object { $_.Groups[1].Value }
+        # 匹配多种格式：DNS Name=xxx, DNS:xxx, DNS 名称=xxx
+        $dnsNames = [regex]::Matches($sanStr, '(?:DNS Name=|DNS:|DNS 名称=)([^\s,]+)') | ForEach-Object { $_.Groups[1].Value }
         if ($dnsNames) {
             Write-Output "DNSNames: $($dnsNames -join ',')"
         }
@@ -94,9 +133,9 @@ func parseCertList(output string) []CertInfo {
 			case "Issuer":
 				current.Issuer = value
 			case "NotBefore":
-				current.NotBefore, _ = time.Parse("2006-01-02 15:04:05", value)
+				current.NotBefore = parseTimeMultiFormat(value)
 			case "NotAfter":
-				current.NotAfter, _ = time.Parse("2006-01-02 15:04:05", value)
+				current.NotAfter = parseTimeMultiFormat(value)
 			case "FriendlyName":
 				current.FriendlyName = value
 			case "HasPrivateKey":
@@ -152,10 +191,12 @@ func GetCertDisplayName(cert *CertInfo) string {
 	return cert.Subject
 }
 
+// cnRegex 用于从证书主题中提取 CN
+var cnRegex = regexp.MustCompile(`CN=([^,]+)`)
+
 // extractCN 从证书主题中提取 CN
 func extractCN(subject string) string {
-	re := regexp.MustCompile(`CN=([^,]+)`)
-	matches := re.FindStringSubmatch(subject)
+	matches := cnRegex.FindStringSubmatch(subject)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
 	}
@@ -183,49 +224,16 @@ func GetCertStatus(cert *CertInfo) string {
 
 // MatchesDomain 检查证书是否匹配指定域名
 func (c *CertInfo) MatchesDomain(domain string) bool {
-	domain = strings.ToLower(domain)
-
 	// 检查 CN
-	cn := strings.ToLower(extractCN(c.Subject))
-	if matchDomain(cn, domain) {
+	cn := extractCN(c.Subject)
+	if util.MatchDomain(domain, cn) {
 		return true
 	}
 
 	// 检查 SAN DNS 名称
 	for _, dns := range c.DNSNames {
-		if matchDomain(strings.ToLower(dns), domain) {
+		if util.MatchDomain(domain, dns) {
 			return true
-		}
-	}
-
-	return false
-}
-
-// matchDomain 检查证书域名是否匹配目标域名（支持通配符）
-func matchDomain(certDomain, targetDomain string) bool {
-	if certDomain == "" || targetDomain == "" {
-		return false
-	}
-
-	// 精确匹配
-	if certDomain == targetDomain {
-		return true
-	}
-
-	// 通配符匹配 (*.example.com)
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // .example.com
-		// 匹配 example.com 本身
-		if targetDomain == certDomain[2:] {
-			return true
-		}
-		// 匹配 sub.example.com
-		if strings.HasSuffix(targetDomain, suffix) {
-			// 确保只匹配一级子域名
-			prefix := targetDomain[:len(targetDomain)-len(suffix)]
-			if !strings.Contains(prefix, ".") {
-				return true
-			}
 		}
 	}
 
@@ -264,7 +272,7 @@ if ($cert) {
     Remove-Item -Path $cert.PSPath -Force
     Write-Output "OK"
 } else {
-    Write-Error "证书不存在"
+    throw "证书不存在"
 }
 `, escapedThumbprint)
 
@@ -319,12 +327,17 @@ func GetWildcardName(domain string) string {
 		return domain
 	}
 
-	// 提取根域名并转为通配符格式
-	parts := strings.Split(domain, ".")
-	if len(parts) >= 2 {
-		// 取最后两部分作为根域名
-		rootDomain := strings.Join(parts[len(parts)-2:], ".")
-		return "*." + rootDomain
+	// 去掉第一级子域名，替换为通配符
+	// a.b.example.com → *.b.example.com
+	// www.example.com → *.example.com
+	// example.com     → *.example.com（根域名保持完整）
+	parts := strings.SplitN(domain, ".", 2)
+	if len(parts) == 2 && parts[1] != "" {
+		// 根域名（只有两部分如 example.com）→ *.example.com
+		if !strings.Contains(parts[1], ".") {
+			return "*." + domain
+		}
+		return "*." + parts[1]
 	}
 
 	return domain

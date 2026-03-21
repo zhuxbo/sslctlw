@@ -2,11 +2,45 @@ package cert
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"encoding/pem"
+	"sslctlw/config"
 )
+
+// KeyEncryptionPrefix 私钥加密版本前缀
+const KeyEncryptionPrefix = "v1:dpapi:"
+
+// EncryptPrivateKey 使用 DPAPI 加密私钥
+func EncryptPrivateKey(keyPEM string) (string, error) {
+	if keyPEM == "" {
+		return "", nil
+	}
+	encrypted, err := config.EncryptToken(keyPEM)
+	if err != nil {
+		return "", err
+	}
+	// 替换前缀为私钥专用前缀
+	return KeyEncryptionPrefix + strings.TrimPrefix(encrypted, config.EncryptionPrefix), nil
+}
+
+// DecryptPrivateKey 使用 DPAPI 解密私钥
+func DecryptPrivateKey(encrypted string) (string, error) {
+	if encrypted == "" {
+		return "", nil
+	}
+	if !strings.HasPrefix(encrypted, KeyEncryptionPrefix) {
+		return "", errors.New("无效的私钥格式")
+	}
+	// 提取 base64 数据，直接用底层 DecryptToken 解密
+	base64Data := strings.TrimPrefix(encrypted, KeyEncryptionPrefix)
+	return config.DecryptToken(config.EncryptionPrefix + base64Data)
+}
 
 // OrderMeta 订单元数据
 type OrderMeta struct {
@@ -22,16 +56,12 @@ type OrderMeta struct {
 
 // OrderStore 本地订单存储
 type OrderStore struct {
-	BaseDir string // 默认 {程序目录}/data/orders/
+	BaseDir string // 默认 {程序目录}/sslctlw/orders/
 }
 
-// NewOrderStore 创建订单存储
+// NewOrderStore 创建订单存储（使用 config.GetDataDir() 保持路径一致）
 func NewOrderStore() *OrderStore {
-	exe, err := os.Executable()
-	if err != nil {
-		return &OrderStore{BaseDir: filepath.Join(".", "data", "orders")}
-	}
-	baseDir := filepath.Join(filepath.Dir(exe), "data", "orders")
+	baseDir := filepath.Join(config.GetDataDir(), "orders")
 	return &OrderStore{BaseDir: baseDir}
 }
 
@@ -46,23 +76,35 @@ func (s *OrderStore) EnsureOrderDir(orderID int) error {
 	return os.MkdirAll(orderPath, 0700)
 }
 
-// SavePrivateKey 保存私钥到订单目录
+// SavePrivateKey 保存私钥到订单目录（使用 DPAPI 加密）
 func (s *OrderStore) SavePrivateKey(orderID int, keyPEM string) error {
 	if err := s.EnsureOrderDir(orderID); err != nil {
 		return fmt.Errorf("创建订单目录失败: %w", err)
 	}
+	encrypted, err := EncryptPrivateKey(keyPEM)
+	if err != nil {
+		return fmt.Errorf("加密私钥失败: %w", err)
+	}
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
-	return os.WriteFile(keyPath, []byte(keyPEM), 0600)
+	return os.WriteFile(keyPath, []byte(encrypted), 0600)
 }
 
-// LoadPrivateKey 从订单目录加载私钥
+// LoadPrivateKey 从订单目录加载私钥（使用 DPAPI 解密）
 func (s *OrderStore) LoadPrivateKey(orderID int) (string, error) {
 	keyPath := filepath.Join(s.GetOrderPath(orderID), "private.key")
 	data, err := os.ReadFile(keyPath)
 	if err != nil {
 		return "", err
 	}
-	return string(data), nil
+	keyPEM, err := DecryptPrivateKey(string(data))
+	if err != nil {
+		return "", err
+	}
+	// 验证解密后的数据是有效 PEM 格式
+	if block, _ := pem.Decode([]byte(keyPEM)); block == nil {
+		return "", errors.New("私钥文件可能已损坏")
+	}
+	return keyPEM, nil
 }
 
 // HasPrivateKey 检查订单是否有本地私钥
@@ -79,16 +121,16 @@ func (s *OrderStore) SaveCertificate(orderID int, certPEM, chainPEM string) erro
 	}
 	orderPath := s.GetOrderPath(orderID)
 
-	// 保存证书
+	// 保存证书（权限 0600 - 仅所有者可读写）
 	certPath := filepath.Join(orderPath, "cert.pem")
-	if err := os.WriteFile(certPath, []byte(certPEM), 0644); err != nil {
+	if err := os.WriteFile(certPath, []byte(certPEM), 0600); err != nil {
 		return fmt.Errorf("保存证书失败: %w", err)
 	}
 
 	// 保存证书链（如果有）
 	if chainPEM != "" {
 		chainPath := filepath.Join(orderPath, "chain.pem")
-		if err := os.WriteFile(chainPath, []byte(chainPEM), 0644); err != nil {
+		if err := os.WriteFile(chainPath, []byte(chainPEM), 0600); err != nil {
 			return fmt.Errorf("保存证书链失败: %w", err)
 		}
 	}
@@ -128,7 +170,7 @@ func (s *OrderStore) SaveMeta(orderID int, meta *OrderMeta) error {
 		return fmt.Errorf("序列化元数据失败: %w", err)
 	}
 
-	return os.WriteFile(metaPath, data, 0644)
+	return os.WriteFile(metaPath, data, 0600) // 权限 0600 - 仅所有者可读写
 }
 
 // LoadMeta 加载订单元数据

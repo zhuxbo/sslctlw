@@ -2,20 +2,38 @@ package util
 
 import (
 	"bytes"
+	"context"
+	"os"
 	"os/exec"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
 
+// 默认命令超时
+var (
+	DefaultCmdTimeout        = 2 * time.Minute
+	DefaultPowerShellTimeout = 5 * time.Minute
+)
+
+// newCmdContext 创建带超时的命令，返回 cmd 和 cancel 函数
+// 调用方必须在命令执行完毕后调用 cancel 释放资源
+func newCmdContext(timeout time.Duration, name string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd, cancel
+}
+
 // RunPowerShell 执行 PowerShell 命令（隐藏窗口，UTF-8 输出）
 func RunPowerShell(script string) (string, error) {
 	// 在脚本开头设置 UTF-8 输出编码
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
 
 	// 隐藏窗口
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -35,7 +53,8 @@ func RunPowerShell(script string) (string, error) {
 func RunPowerShellCombined(script string) (string, error) {
 	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
 
-	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -50,9 +69,36 @@ func RunPowerShellCombined(script string) (string, error) {
 	return string(output), nil
 }
 
+// RunPowerShellWithEnv 执行 PowerShell 命令，支持环境变量传递敏感数据
+func RunPowerShellWithEnv(script string, env map[string]string) (string, error) {
+	fullScript := "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; " + script
+
+	cmd, cancel := newCmdContext(DefaultPowerShellTimeout, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", fullScript)
+	defer cancel()
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+
+	// 追加环境变量
+	cmd.Env = os.Environ()
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(output), err
+	}
+
+	return string(output), nil
+}
+
 // RunCmd 执行普通命令（隐藏窗口）
 func RunCmd(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -75,7 +121,8 @@ func RunCmd(name string, args ...string) (string, error) {
 
 // RunCmdCombined 执行普通命令，返回 stdout + stderr
 func RunCmdCombined(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
 
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,
@@ -94,13 +141,14 @@ func RunCmdCombined(name string, args ...string) (string, error) {
 }
 
 // GBKToUTF8 将 GBK 编码转换为 UTF-8
-// 如果已经是有效的 UTF-8 且包含中文，则不转换
+// 如果已经是有效的 UTF-8（包括纯 ASCII），则不转换
 func GBKToUTF8(data []byte) ([]byte, error) {
-	// 如果已经是有效的 UTF-8，直接返回
-	if utf8.Valid(data) && containsChineseUTF8(data) {
+	// 有效的 UTF-8 直接返回（纯 ASCII 也是有效的 UTF-8）
+	if utf8.Valid(data) {
 		return data, nil
 	}
 
+	// 非有效 UTF-8，尝试 GBK 解码
 	reader := transform.NewReader(bytes.NewReader(data), simplifiedchinese.GBK.NewDecoder())
 	var buf bytes.Buffer
 	_, err := buf.ReadFrom(reader)
@@ -120,4 +168,50 @@ func containsChineseUTF8(data []byte) bool {
 		data = data[size:]
 	}
 	return false
+}
+
+// RunCmdDirect 直接执行命令（不经过 shell 解析，更安全）
+// 适用于执行外部程序时需要防止命令注入的场景
+func RunCmdDirect(name string, args ...string) (string, error) {
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+
+	// 尝试 GBK 转 UTF-8
+	utf8Output, convErr := GBKToUTF8(output)
+	if convErr != nil {
+		return string(output), nil
+	}
+
+	return string(utf8Output), nil
+}
+
+// RunCmdDirectCombined 直接执行命令，返回 stdout + stderr
+func RunCmdDirectCombined(name string, args ...string) (string, error) {
+	cmd, cancel := newCmdContext(DefaultCmdTimeout, name, args...)
+	defer cancel()
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
+	}
+
+	output, err := cmd.CombinedOutput()
+
+	// 尝试 GBK 转 UTF-8
+	utf8Output, convErr := GBKToUTF8(output)
+	if convErr != nil {
+		return string(output), err
+	}
+
+	return string(utf8Output), err
 }

@@ -25,12 +25,20 @@ Desktop.ini
 .DS_Store
 
 # Debug
+*.err
 *.log
 debug/
 
 # settings
-CertDeploy/
+sslctlw/
 config.json
+
+# Build/release config (contains secrets)
+build/build.conf
+build/release.conf
 
 # Temp
 nul
+
+# Coverage
+/*.out

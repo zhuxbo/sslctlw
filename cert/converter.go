@@ -5,11 +5,13 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"software.sslmate.com/src/go-pkcs12"
+
+	"sslctlw/config"
 )
 
 // PEMToPFX 将 PEM 格式的证书和私钥转换为 PFX 格式
@@ -36,18 +38,29 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 	var caCerts []*x509.Certificate
 	if intermediatePEM != "" {
 		remaining := []byte(intermediatePEM)
+		certIndex := 0
+		parseErrors := 0
 		for {
 			block, rest := pem.Decode(remaining)
 			if block == nil {
 				break
 			}
 			if block.Type == "CERTIFICATE" {
+				certIndex++
 				caCert, err := x509.ParseCertificate(block.Bytes)
-				if err == nil {
+				if err != nil {
+					// 记录警告但继续处理其他证书
+					log.Printf("警告: 无法解析证书链中的第 %d 个证书: %v\n", certIndex, err)
+					parseErrors++
+				} else {
 					caCerts = append(caCerts, caCert)
 				}
 			}
 			remaining = rest
+		}
+		// 如果有证书块但全部解析失败，返回错误
+		if certIndex > 0 && len(caCerts) == 0 {
+			return "", fmt.Errorf("证书链中的 %d 个证书全部解析失败", certIndex)
 		}
 	}
 
@@ -57,9 +70,16 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 		return "", fmt.Errorf("生成 PFX 失败: %w", err)
 	}
 
-	// 写入临时文件
-	tempDir := os.TempDir()
-	pfxPath := filepath.Join(tempDir, fmt.Sprintf("cert_%s.pfx", generateRandomString(8)))
+	// 写入应用数据目录下的临时文件（避免系统 TEMP 目录的权限问题）
+	tempDir := filepath.Join(config.GetDataDir(), "temp")
+	if mkErr := os.MkdirAll(tempDir, 0700); mkErr != nil {
+		return "", fmt.Errorf("创建临时目录失败: %w", mkErr)
+	}
+	randomStr, err := generateRandomString(8)
+	if err != nil {
+		return "", fmt.Errorf("生成临时文件名失败: %w", err)
+	}
+	pfxPath := filepath.Join(tempDir, fmt.Sprintf("cert_%s.pfx", randomStr))
 
 	if err := os.WriteFile(pfxPath, pfxData, 0600); err != nil {
 		return "", fmt.Errorf("写入 PFX 文件失败: %w", err)
@@ -69,15 +89,17 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 }
 
 // generateRandomString 生成随机字符串
-func generateRandomString(length int) string {
+// 使用加密安全的随机数
+func generateRandomString(length int) (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
-		// 回退到时间戳
-		return fmt.Sprintf("%d", time.Now().UnixNano())
+		// rand.Read 失败极为罕见（仅当系统熵源不可用时）
+		// 返回错误而非使用不安全的降级方案
+		return "", fmt.Errorf("加密随机数生成失败: %w", err)
 	}
 	for i := range b {
 		b[i] = charset[int(b[i])%len(charset)]
 	}
-	return string(b)
+	return string(b), nil
 }

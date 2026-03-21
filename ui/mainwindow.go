@@ -1,24 +1,23 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
 
-	"cert-deploy/cert"
-	"cert-deploy/config"
-	"cert-deploy/iis"
-	"cert-deploy/util"
+	"sslctlw/cert"
+	"sslctlw/config"
+	"sslctlw/iis"
+	"sslctlw/upgrade"
+	"sslctlw/util"
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"
-	"github.com/rodrigocfd/windigo/win"
 )
 
 // 调试模式
@@ -28,10 +27,21 @@ var (
 	debugLogFile *os.File
 )
 
+// 版本号（由 main.go 设置）
+var version = "0.0.0"
+
+// SetVersion 设置版本号（在 RunApp 之前调用）
+func SetVersion(v string) {
+	version = v
+}
+
 // EnableDebugMode 启用调试模式
 func EnableDebugMode() {
 	debugMode = true
-	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if debugLogFile != nil {
+		debugLogFile.Close()
+	}
+	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return
 	}
@@ -47,6 +57,16 @@ func logDebug(format string, v ...interface{}) {
 	}
 }
 
+// CloseDebugMode 关闭调试模式并释放资源
+func CloseDebugMode() {
+	if debugLogFile != nil {
+		debugLogFile.Sync()
+		debugLogFile.Close()
+		debugLogFile = nil
+		debugLog = nil
+	}
+}
+
 // AppWindow 主窗口
 type AppWindow struct {
 	mainWnd    *ui.Main
@@ -54,12 +74,17 @@ type AppWindow struct {
 	statusBar  *ui.StatusBar
 	certs      []cert.CertInfo
 	sites      []SiteItem
+	dataMu     sync.RWMutex // 保护 certs 和 sites 共享数据
 	btnRefresh *ui.Button
 	btnBind    *ui.Button
 	btnInstall *ui.Button
 	btnAPI     *ui.Button
 	loading    bool
 	loadingMu  sync.Mutex // 保护 loading 标志
+
+	// context 用于取消后台 goroutine
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 
 	// 后台任务相关
 	bgTask          *BackgroundTask
@@ -71,8 +96,33 @@ type AppWindow struct {
 	txtTaskLog      *ui.Edit
 	statusIndicator *StatusIndicator // 状态指示器
 
-	// 日志缓存
-	logLines []string
+	logBuffer  *LogBuffer      // 日志缓存组件
+	toolbarBtns *ButtonGroup   // 新增: 工具栏按钮组
+}
+
+// getCerts 安全获取证书列表副本
+func (app *AppWindow) getCerts() []cert.CertInfo {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	return append([]cert.CertInfo{}, app.certs...)
+}
+
+// getSites 安全获取站点列表副本
+func (app *AppWindow) getSites() []SiteItem {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	return append([]SiteItem{}, app.sites...)
+}
+
+// getSite 安全获取指定索引的站点副本
+func (app *AppWindow) getSite(idx int) *SiteItem {
+	app.dataMu.RLock()
+	defer app.dataMu.RUnlock()
+	if idx < 0 || idx >= len(app.sites) {
+		return nil
+	}
+	site := app.sites[idx]
+	return &site
 }
 
 // SiteItem 站点列表项
@@ -89,8 +139,14 @@ type SiteItem struct {
 func RunApp() {
 	runtime.LockOSThread()
 
+	// 确保程序退出时清理调试模式资源
+	defer CloseDebugMode()
+
+	ctx, cancel := context.WithCancel(context.Background())
 	app := &AppWindow{
-		bgTask: NewBackgroundTask(),
+		bgTask:    NewBackgroundTask(),
+		ctx:       ctx,
+		cancelCtx: cancel,
 	}
 
 	// 创建主窗口
@@ -105,34 +161,51 @@ func RunApp() {
 	app.btnRefresh = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("刷新").
-			Position(ui.Dpi(10, 10)).
-			Width(ui.DpiX(70)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthSmall)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnBind = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("绑定证书").
-			Position(ui.Dpi(90, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnInstall = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("导入证书").
-			Position(ui.Dpi(180, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+MarginMedium+ButtonWidthMedium+MarginMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
 
 	app.btnAPI = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
 			Text("部署接口").
-			Position(ui.Dpi(270, 10)).
-			Width(ui.DpiX(80)).
-			Height(ui.DpiY(28)),
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+3*(ButtonWidthMedium+MarginMedium)-ButtonWidthMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
 	)
+
+	// 检查更新按钮
+	btnCheckUpdate := ui.NewButton(app.mainWnd,
+		ui.OptsButton().
+			Text("检查更新").
+			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+4*(ButtonWidthMedium+MarginMedium)-ButtonWidthMedium, MarginMedium)).
+			Width(ui.DpiX(ButtonWidthMedium)).
+			Height(ui.DpiY(ButtonHeight)),
+	)
+
+	// 检查更新按钮事件
+	btnCheckUpdate.On().BnClicked(func() {
+		ShowUpgradeDialog(app.mainWnd, version, func() {
+			// 升级完成后刷新
+			app.refreshSiteList()
+		})
+	})
 
 	// 创建站点列表
 	app.siteList = ui.NewListView(app.mainWnd,
@@ -198,6 +271,12 @@ func RunApp() {
 
 	// 窗口创建完成后初始化
 	app.mainWnd.On().WmCreate(func(_ ui.WmCreate) int {
+		// 初始化工具栏按钮组
+		app.toolbarBtns = NewButtonGroup(app.btnRefresh, app.btnBind, app.btnInstall, app.btnAPI)
+
+		// 初始化日志缓存
+		app.logBuffer = NewLogBuffer(app.txtTaskLog, 100)
+
 		// 添加列
 		app.siteList.Cols.Add("站点名称", ui.DpiX(150))
 		app.siteList.Cols.Add("状态", ui.DpiX(60))
@@ -213,16 +292,34 @@ func RunApp() {
 
 		// 延迟初始化
 		go func() {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-app.ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 
 			// 异步检查任务计划状态
 			go func() {
+				// 检查 context 是否已取消
+				select {
+				case <-app.ctx.Done():
+					return
+				default:
+				}
+
 				cfg, _ := config.Load()
 				taskName := util.DefaultTaskName
 				if cfg != nil && cfg.TaskName != "" {
 					taskName = cfg.TaskName
 				}
 				taskExists := util.IsTaskExists(taskName)
+
+				// 再次检查 context
+				select {
+				case <-app.ctx.Done():
+					return
+				default:
+				}
 
 				app.mainWnd.UiThread(func() {
 					if taskExists {
@@ -238,12 +335,22 @@ func RunApp() {
 				})
 			}()
 
+			// 检查 context
+			select {
+			case <-app.ctx.Done():
+				return
+			default:
+			}
+
 			// 加载数据
 			app.mainWnd.UiThread(func() {
 				app.setButtonsEnabled(false)
 				app.setStatus("正在加载...")
 			})
-			app.doLoadDataAsync(nil)
+			app.doLoadDataAsync(func() {
+				// 数据加载完成后，检查是否需要自动检查更新
+				app.checkAutoUpgrade()
+			})
 		}()
 
 		return 0
@@ -263,30 +370,29 @@ func RunApp() {
 			return
 		}
 		cx, cy := int(p.ClientAreaSize().Cx), int(p.ClientAreaSize().Cy)
-		statusHeight := 22
-		taskPanelHeight := 180
 
 		// 调整站点列表大小
-		listHeight := cy - 50 - statusHeight - taskPanelHeight
-		if listHeight < 100 {
-			listHeight = 100
+		toolbarHeight := MarginMedium + ButtonHeight + MarginMedium
+		listHeight := cy - toolbarHeight - StatusBarHeight - TaskPanelHeight
+		if listHeight < ListMinHeight {
+			listHeight = ListMinHeight
 		}
-		app.siteList.Hwnd().SetWindowPos(0, 10, 50, cx-20, listHeight, co.SWP_NOZORDER)
+		app.siteList.Hwnd().SetWindowPos(0, MarginMedium, toolbarHeight, cx-MarginLarge, listHeight, co.SWP_NOZORDER)
 
 		// 调整后台任务面板位置
-		taskPanelY := 50 + listHeight + 5
-		app.lblTaskSection.Hwnd().SetWindowPos(0, 10, taskPanelY, 200, 20, co.SWP_NOZORDER)
-		app.btnAutoCheck.Hwnd().SetWindowPos(0, 10, taskPanelY+25, 100, 28, co.SWP_NOZORDER)
-		app.btnCheckNow.Hwnd().SetWindowPos(0, 120, taskPanelY+25, 80, 28, co.SWP_NOZORDER)
-		app.btnConfig.Hwnd().SetWindowPos(0, 210, taskPanelY+25, 80, 28, co.SWP_NOZORDER)
+		taskPanelY := toolbarHeight + listHeight + MarginSmall
+		app.lblTaskSection.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY, 200, 20, co.SWP_NOZORDER)
+		app.btnAutoCheck.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+25, ButtonWidthLarge, ButtonHeight, co.SWP_NOZORDER)
+		app.btnCheckNow.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+MarginMedium, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
+		app.btnConfig.Hwnd().SetWindowPos(0, MarginMedium+ButtonWidthLarge+ButtonWidthMedium+MarginLarge, taskPanelY+25, ButtonWidthMedium, ButtonHeight, co.SWP_NOZORDER)
 
 		// 状态指示器位置
 		if app.statusIndicator != nil {
-			app.statusIndicator.SetPosition(300, taskPanelY+28)
+			app.statusIndicator.SetPosition(300, taskPanelY+ButtonHeight)
 		}
 
 		app.lblTaskStatus.Hwnd().SetWindowPos(0, 330, taskPanelY+30, cx-350, 20, co.SWP_NOZORDER)
-		app.txtTaskLog.Hwnd().SetWindowPos(0, 10, taskPanelY+60, cx-20, cy-taskPanelY-60-statusHeight-5, co.SWP_NOZORDER)
+		app.txtTaskLog.Hwnd().SetWindowPos(0, MarginMedium, taskPanelY+60, cx-MarginLarge, cy-taskPanelY-60-StatusBarHeight-MarginSmall, co.SWP_NOZORDER)
 	})
 
 	// 按钮事件
@@ -297,35 +403,23 @@ func RunApp() {
 	})
 
 	app.btnBind.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		app.onBindCert()
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
-			})
+		app.withPausedTaskUpdate(func() {
+			app.onBindCert()
 		})
 	})
 
 	app.btnInstall.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowInstallDialog(app.mainWnd, func() {
-			app.doLoadDataAsync(nil)
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowInstallDialog(app.mainWnd, func() {
+				app.doLoadDataAsync(nil)
 			})
 		})
 	})
 
 	app.btnAPI.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowAPIDialog(app.mainWnd, func() {
-			app.doLoadDataAsync(nil)
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowAPIDialog(app.mainWnd, func() {
+				app.doLoadDataAsync(nil)
 			})
 		})
 	})
@@ -340,17 +434,13 @@ func RunApp() {
 	})
 
 	app.btnConfig.On().BnClicked(func() {
-		app.bgTask.SetOnUpdate(nil)
-		ShowCertManagerDialog(app.mainWnd, func() {
-			go func() {
-				app.mainWnd.UiThread(func() {
-					app.appendTaskLog("配置已更新")
-				})
-			}()
-		})
-		app.bgTask.SetOnUpdate(func() {
-			app.mainWnd.UiThread(func() {
-				app.updateTaskStatus()
+		app.withPausedTaskUpdate(func() {
+			ShowCertManagerDialog(app.mainWnd, func() {
+				go func() {
+					app.mainWnd.UiThread(func() {
+						app.appendTaskLog("配置已更新")
+					})
+				}()
 			})
 		})
 	})
@@ -362,6 +452,20 @@ func RunApp() {
 		})
 	})
 
+	// 窗口关闭时清理资源
+	app.mainWnd.On().WmDestroy(func() {
+		// 取消所有后台 goroutine
+		if app.cancelCtx != nil {
+			app.cancelCtx()
+		}
+		// 停止后台任务
+		if app.bgTask != nil {
+			app.bgTask.Stop()
+		}
+		// 关闭调试模式
+		CloseDebugMode()
+	})
+
 	app.mainWnd.RunAsMain()
 }
 
@@ -370,6 +474,13 @@ func (app *AppWindow) toggleAutoCheck() {
 	app.btnAutoCheck.Hwnd().EnableWindow(false)
 
 	go func() {
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
 		cfg, _ := config.Load()
 		taskName := util.DefaultTaskName
 		if cfg != nil && cfg.TaskName != "" {
@@ -393,7 +504,9 @@ func (app *AppWindow) toggleAutoCheck() {
 
 				if cfg != nil {
 					cfg.AutoCheckEnabled = false
-					cfg.Save()
+					if err := cfg.Save(); err != nil {
+						app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
+					}
 				}
 
 				app.btnAutoCheck.SetText("启动自动部署")
@@ -428,7 +541,9 @@ func (app *AppWindow) toggleAutoCheck() {
 				}
 
 				cfg.AutoCheckEnabled = true
-				cfg.Save()
+				if err := cfg.Save(); err != nil {
+					app.appendTaskLog(fmt.Sprintf("警告: 保存配置失败: %v", err))
+				}
 
 				app.btnAutoCheck.SetText("停止自动部署")
 				app.statusIndicator.SetState(IndicatorRunning)
@@ -445,6 +560,23 @@ func (app *AppWindow) runCheckNow() {
 	app.btnCheckNow.Hwnd().EnableWindow(false)
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("runCheckNow panic: %v", r)
+				app.mainWnd.UiThread(func() {
+					app.btnCheckNow.Hwnd().EnableWindow(true)
+					app.appendTaskLog(fmt.Sprintf("检测异常: %v", r))
+				})
+			}
+		}()
+
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
 		cfg, _ := config.Load()
 
 		if cfg == nil || len(cfg.Certificates) == 0 {
@@ -459,7 +591,23 @@ func (app *AppWindow) runCheckNow() {
 			app.appendTaskLog("开始手动检测...")
 		})
 
-		app.bgTask.RunOnceSync()
+		// 使用带超时的通道，防止 RunOnceSync 永久阻塞
+		done := make(chan struct{})
+		go func() {
+			app.bgTask.RunOnceSync()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			// 正常完成
+		case <-time.After(10 * time.Minute):
+			app.mainWnd.UiThread(func() {
+				app.appendTaskLog("检测超时（10分钟），请检查网络或 IIS 状态")
+			})
+		case <-app.ctx.Done():
+			return
+		}
 
 		app.doLoadDataAsync(func() {
 			app.mainWnd.UiThread(func() {
@@ -508,24 +656,9 @@ func (app *AppWindow) updateTaskStatus() {
 
 // appendTaskLog 追加任务日志
 func (app *AppWindow) appendTaskLog(text string) {
-	const maxLogLines = 100
-
-	timestamp := time.Now().Format("15:04:05")
-	logLine := fmt.Sprintf("[%s] %s", timestamp, text)
-
-	app.logLines = append(app.logLines, logLine)
-	if len(app.logLines) > maxLogLines {
-		app.logLines = app.logLines[len(app.logLines)-maxLogLines:]
-		app.txtTaskLog.SetText(strings.Join(app.logLines, "\r\n") + "\r\n")
-	} else {
-		textLen, _ := app.txtTaskLog.Hwnd().SendMessage(co.WM_GETTEXTLENGTH, 0, 0)
-		app.txtTaskLog.Hwnd().SendMessage(0x00B1, win.WPARAM(textLen), win.LPARAM(textLen)) // EM_SETSEL
-		newText := logLine + "\r\n"
-		ptr, _ := syscall.UTF16PtrFromString(newText)
-		app.txtTaskLog.Hwnd().SendMessage(0x00C2, 0, win.LPARAM(unsafe.Pointer(ptr))) // EM_REPLACESEL
+	if app.logBuffer != nil {
+		app.logBuffer.Append(text)
 	}
-
-	app.txtTaskLog.Hwnd().SendMessage(0x00B6, 0, 0xFFFF) // EM_LINESCROLL
 }
 
 // doLoadDataAsync 异步加载数据
@@ -533,12 +666,41 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 	app.loadingMu.Lock()
 	if app.loading {
 		app.loadingMu.Unlock()
+		if onComplete != nil {
+			onComplete()
+		}
 		return
 	}
 	app.loading = true
 	app.loadingMu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("doLoadDataAsync panic: %v", r)
+				app.mainWnd.UiThread(func() {
+					app.loadingMu.Lock()
+					app.loading = false
+					app.loadingMu.Unlock()
+					app.setStatus(fmt.Sprintf("加载异常: %v", r))
+					app.setButtonsEnabled(true)
+					if onComplete != nil {
+						onComplete()
+					}
+				})
+			}
+		}()
+
+		// 检查 context 是否已取消
+		select {
+		case <-app.ctx.Done():
+			app.loadingMu.Lock()
+			app.loading = false
+			app.loadingMu.Unlock()
+			return
+		default:
+		}
+
 		var loadErr error
 		var sites []iis.SiteInfo
 		var certs []cert.CertInfo
@@ -549,8 +711,15 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 		} else {
 			sites, loadErr = iis.ScanSites()
 			if loadErr == nil {
-				certs, _ = cert.ListCertificates()
-				sslBindings, _ = iis.ListSSLBindings()
+				var certErr, sslErr error
+				certs, certErr = cert.ListCertificates()
+				if certErr != nil {
+					log.Printf("警告: 加载证书列表失败: %v", certErr)
+				}
+				sslBindings, sslErr = iis.ListSSLBindings()
+				if sslErr != nil {
+					log.Printf("警告: 加载 SSL 绑定失败: %v", sslErr)
+				}
 			}
 		}
 
@@ -575,8 +744,10 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 			if loadErr != nil {
 				app.setStatus("加载失败: " + loadErr.Error())
 			} else {
+				app.dataMu.Lock()
 				app.certs = certs
 				app.sites = siteItems
+				app.dataMu.Unlock()
 
 				app.siteList.Items.DeleteAll()
 				for _, item := range siteItems {
@@ -605,17 +776,8 @@ func (app *AppWindow) doLoadDataAsync(onComplete func()) {
 
 // setButtonsEnabled 设置按钮启用状态
 func (app *AppWindow) setButtonsEnabled(enabled bool) {
-	if app.btnRefresh != nil {
-		app.btnRefresh.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnBind != nil {
-		app.btnBind.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnInstall != nil {
-		app.btnInstall.Hwnd().EnableWindow(enabled)
-	}
-	if app.btnAPI != nil {
-		app.btnAPI.Hwnd().EnableWindow(enabled)
+	if app.toolbarBtns != nil {
+		app.toolbarBtns.SetEnabled(enabled)
 	}
 }
 
@@ -670,14 +832,32 @@ func (app *AppWindow) onBindCert() {
 	}
 
 	idx := selected[0].Index()
+
+	// 直接访问数据（UI 线程内安全）
+	app.dataMu.RLock()
 	if idx < 0 || idx >= len(app.sites) {
+		app.dataMu.RUnlock()
 		return
 	}
+	site := app.sites[idx].SiteInfo
+	certs := make([]cert.CertInfo, len(app.certs))
+	copy(certs, app.certs)
+	app.dataMu.RUnlock()
 
-	site := &app.sites[idx].SiteInfo
-	ShowBindDialog(app.mainWnd, site, app.certs, func() {
+	ShowBindDialog(app.mainWnd, &site, certs, func() {
 		app.doLoadDataAsync(nil)
 	})
+}
+
+// withPausedTaskUpdate 暂停后台任务更新回调执行 fn，结束后用 defer 恢复
+func (app *AppWindow) withPausedTaskUpdate(fn func()) {
+	app.bgTask.SetOnUpdate(nil)
+	defer app.bgTask.SetOnUpdate(func() {
+		app.mainWnd.UiThread(func() {
+			app.updateTaskStatus()
+		})
+	})
+	fn()
 }
 
 // setStatus 设置状态栏
@@ -685,4 +865,80 @@ func (app *AppWindow) setStatus(text string) {
 	if app.statusBar != nil && app.statusBar.Parts.Count() > 0 {
 		app.statusBar.Parts.Get(0).SetText(text)
 	}
+}
+
+// refreshSiteList 刷新站点列表
+func (app *AppWindow) refreshSiteList() {
+	app.setButtonsEnabled(false)
+	app.setStatus("正在刷新...")
+	app.doLoadDataAsync(nil)
+}
+
+// checkAutoUpgrade 检查是否需要自动检查更新
+func (app *AppWindow) checkAutoUpgrade() {
+	go func() {
+		// 检查 context
+		select {
+		case <-app.ctx.Done():
+			return
+		default:
+		}
+
+		cfg, err := config.Load()
+		if err != nil || cfg == nil {
+			return
+		}
+
+		// 检查是否启用了自动检查更新
+		if !cfg.UpgradeEnabled {
+			return
+		}
+
+		// 检查 Release URL 是否配置
+		if cfg.ReleaseURL == "" {
+			return
+		}
+
+		// 创建升级配置（安全配置从 DefaultConfig 获取）
+		defaultCfg := upgrade.DefaultConfig()
+		upgradeCfg := &upgrade.Config{
+			Enabled:        cfg.UpgradeEnabled,
+			Channel:        upgrade.Channel(cfg.UpgradeChannel),
+			CheckInterval:  cfg.UpgradeInterval,
+			LastCheck:      cfg.LastUpgradeCheck,
+			SkippedVersion: cfg.SkippedVersion,
+			ReleaseURL:     cfg.ReleaseURL,
+			TrustedOrg:     defaultCfg.TrustedOrg,
+			TrustedCountry: defaultCfg.TrustedCountry,
+			TrustedCAs:     defaultCfg.TrustedCAs,
+		}
+
+		upgrader := upgrade.NewUpgrader(upgradeCfg)
+
+		// 检查是否应该检查更新（基于检查间隔）
+		if !upgrader.ShouldCheckUpdate() {
+			return
+		}
+
+		// 执行更新检查
+		info, err := upgrader.CheckForUpdate(app.ctx, version)
+
+		// 更新上次检查时间
+		upgrader.UpdateLastCheck()
+		cfg.LastUpgradeCheck = upgradeCfg.LastCheck
+		if err := cfg.Save(); err != nil {
+			logDebug("save config failed after auto upgrade check: %v", err)
+		}
+
+		if err != nil || info == nil {
+			return
+		}
+
+		// 发现新版本，在 UI 线程中显示对话框
+		app.mainWnd.UiThread(func() {
+			ShowUpgradeDialog(app.mainWnd, version, func() {
+				app.refreshSiteList()
+			})
+		})
+	}()
 }

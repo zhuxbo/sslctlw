@@ -2,21 +2,30 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
+
+	"sslctlw/util"
 )
 
-// CertListResponse 证书列表响应
-type CertListResponse struct {
-	Code int        `json:"code"`
-	Msg  string     `json:"msg"`
-	Data []CertData `json:"data"`
+// APIResponse API 通用响应（分页格式）
+type APIResponse struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		Data        []CertData `json:"data"`
+		CurrentPage int        `json:"currentPage"`
+		PageSize    int        `json:"pageSize"`
+		Total       int        `json:"total"`
+	} `json:"data"`
 }
 
 // APIError API 错误
@@ -36,15 +45,25 @@ type FileValidation struct {
 // CertData 证书数据
 type CertData struct {
 	OrderID     int             `json:"order_id"`
-	Domain      string          `json:"domain"`         // common_name
 	Domains     string          `json:"domains"`        // alternative_names (逗号分隔)
 	Status      string          `json:"status"`         // active, processing, pending, unpaid
 	Certificate string          `json:"certificate"`    // 证书内容
 	PrivateKey  string          `json:"private_key"`    // 私钥
 	CACert      string          `json:"ca_certificate"` // 中间证书
+	IssuedAt    string          `json:"issued_at"`      // 签发日期
 	ExpiresAt   string          `json:"expires_at"`     // 过期日期
-	CreatedAt   string          `json:"created_at"`     // 创建日期
 	File        *FileValidation `json:"file,omitempty"` // 文件验证信息（processing 状态时返回）
+}
+
+// Domain 返回主域名（domains 的第一个）
+func (c *CertData) Domain() string {
+	if c.Domains == "" {
+		return ""
+	}
+	if idx := strings.Index(c.Domains, ","); idx >= 0 {
+		return strings.TrimSpace(c.Domains[:idx])
+	}
+	return strings.TrimSpace(c.Domains)
 }
 
 // GetDomainList 返回域名列表
@@ -57,46 +76,135 @@ func (c *CertData) GetDomainList() []string {
 
 // Client API 客户端
 type Client struct {
-	BaseURL    string
-	Token      string
-	HTTPClient *http.Client
+	BaseURL        string
+	Token          string
+	HTTPClient     *http.Client
+	insecureURL    bool // 非 HTTPS 且非本地地址
+	insecureReason string
 }
+
+// API 客户端配置常量
+const (
+	// MaxRetries 最大重试次数
+	MaxRetries = 3
+	// APIQueryTimeout 查询类 API 超时时间
+	APIQueryTimeout = 30 * time.Second
+	// APISubmitTimeout 提交类 API 超时时间
+	APISubmitTimeout = 60 * time.Second
+	// APICallbackTimeout 回调类 API 超时时间
+	APICallbackTimeout = 60 * time.Second
+	// maxResponseSize 响应体大小限制 (10MB)
+	maxResponseSize = 10 << 20
+)
 
 // NewClient 创建新的 API 客户端
 func NewClient(baseURL, token string) *Client {
-	return &Client{
+	c := &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   token,
 		HTTPClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 120 * time.Second, // 兜底超时，实际超时由调用方 context 控制
 		},
+	}
+
+	allowed, reason := IsAllowedAPIURL(c.BaseURL)
+	if !allowed {
+		c.insecureURL = true
+		c.insecureReason = reason
+	}
+
+	return c
+}
+
+// IsAllowedAPIURL 校验 API 地址是否允许（仅 HTTPS 或本地 HTTP）
+func IsAllowedAPIURL(baseURL string) (bool, string) {
+	if baseURL == "" {
+		return true, ""
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return false, "API 地址无效"
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return true, ""
+	case "http":
+		host := strings.ToLower(parsed.Hostname())
+		if host == "localhost" {
+			return true, ""
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return true, ""
+		}
+		return false, "API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）"
+	default:
+		return false, "API 地址必须使用 HTTPS"
 	}
 }
 
-const maxRetries = 3
+// doWithRetry 执行带重试的 HTTP 请求，支持 context 取消
+func (c *Client) doWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	if c.insecureURL {
+		if c.insecureReason != "" {
+			return nil, fmt.Errorf("%s: %s", c.insecureReason, c.BaseURL)
+		}
+		return nil, fmt.Errorf("API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）: %s", c.BaseURL)
+	}
 
-// doWithRetry 执行带重试的 HTTP 请求
-func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	// 将 context 添加到请求
+	req = req.WithContext(ctx)
+
+	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		// 检查 context 是否已取消
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+		default:
+		}
+
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+			// 带 context 的休眠
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+			case <-time.After(time.Duration(1<<uint(attempt-1)) * time.Second):
+			}
 			// 重置 Body（如果有）
 			if req.GetBody != nil {
-				body, _ := req.GetBody()
+				body, err := req.GetBody()
+				if err != nil {
+					return nil, fmt.Errorf("重置请求体失败: %w", err)
+				}
 				req.Body = body
 			}
 		}
 
 		resp, err := c.HTTPClient.Do(req)
-		if err == nil {
-			return resp, nil
+		if err != nil {
+			// 检查是否因为 context 取消
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+			}
+			lastErr = err
+			continue
 		}
-		lastErr = err
+
+		// 5xx 错误时关闭响应体并重试
+		if resp.StatusCode >= 500 && attempt < MaxRetries {
+			_, _ = io.Copy(io.Discard, resp.Body) // 忽略丢弃数据时的错误
+			resp.Body.Close()
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
+		}
+
+		return resp, nil
 	}
 
-	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("请求失败（重试 %d 次）: %w", MaxRetries, lastErr)
 }
 
 // Error 实现 error 接口
@@ -105,19 +213,39 @@ func (e *APIError) Error() string {
 		return e.Message
 	}
 	if e.RawBody != "" {
-		// 截取前 200 字符
+		// 截取前 200 字节（UTF-8 安全）
 		body := e.RawBody
 		if len(body) > 200 {
-			body = body[:200] + "..."
+			body = util.TruncateString(body, 200) + "..."
 		}
 		return fmt.Sprintf("HTTP %d: %s", e.StatusCode, body)
 	}
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
-// parseAPIResponse 解析 API 响应，验证格式
-func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
-	// 检查是否是 JSON
+// handleHTTPError 处理 HTTP 错误响应，提取结构化错误信息
+func handleHTTPError(statusCode int, body []byte) *APIError {
+	var errResp struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
+		return &APIError{
+			StatusCode: statusCode,
+			Code:       errResp.Code,
+			Message:    errResp.Msg,
+		}
+	}
+	return &APIError{
+		StatusCode: statusCode,
+		Message:    fmt.Sprintf("HTTP %d: 接口请求失败", statusCode),
+		RawBody:    string(body),
+	}
+}
+
+// checkAPICode 验证 API 响应的 code 字段
+// parseResponse 解析 API 分页响应
+func parseResponse(body []byte, statusCode int) (*APIResponse, error) {
 	if len(body) == 0 {
 		return nil, &APIError{
 			StatusCode: statusCode,
@@ -125,10 +253,8 @@ func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
 		}
 	}
 
-	// 尝试解析 JSON
-	var resp CertListResponse
+	var resp APIResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		// 不是有效的 JSON
 		return nil, &APIError{
 			StatusCode: statusCode,
 			Message:    "返回数据格式错误（非 JSON）",
@@ -136,12 +262,11 @@ func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
 		}
 	}
 
-	// 检查必要字段
-	if resp.Code == 0 && resp.Msg == "" && resp.Data == nil {
+	if resp.Code != 1 {
 		return nil, &APIError{
 			StatusCode: statusCode,
-			Message:    "返回数据格式错误（缺少必要字段）",
-			RawBody:    string(body),
+			Code:       resp.Code,
+			Message:    resp.Msg,
 		}
 	}
 
@@ -149,8 +274,8 @@ func parseAPIResponse(body []byte, statusCode int) (*CertListResponse, error) {
 }
 
 // GetCertByDomain 按域名查询证书，返回最佳匹配（active 且最新）
-func (c *Client) GetCertByDomain(domain string) (*CertData, error) {
-	certs, err := c.ListCertsByDomain(domain)
+func (c *Client) GetCertByDomain(ctx context.Context, domain string) (*CertData, error) {
+	certs, err := c.ListCertsByDomain(ctx, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -169,75 +294,8 @@ func (c *Client) GetCertByDomain(domain string) (*CertData, error) {
 }
 
 // ListCertsByDomain 按域名查询证书列表
-func (c *Client) ListCertsByDomain(domain string) ([]CertData, error) {
-	if c.BaseURL == "" {
-		return nil, fmt.Errorf("部署接口地址未配置")
-	}
-	if c.Token == "" {
-		return nil, fmt.Errorf("部署 Token 未配置")
-	}
-
-	apiURL := c.BaseURL
-	if domain != "" {
-		apiURL += "?domain=" + url.QueryEscape(domain)
-	}
-
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	// 先检查 HTTP 状态码
-	if resp.StatusCode != http.StatusOK {
-		// 尝试解析 JSON 错误信息
-		var errResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
-			return nil, &APIError{
-				StatusCode: resp.StatusCode,
-				Code:       errResp.Code,
-				Message:    errResp.Msg,
-			}
-		}
-		// 非 JSON 响应，返回状态码错误
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("HTTP %d: 接口请求失败", resp.StatusCode),
-			RawBody:    string(body),
-		}
-	}
-
-	// 解析并验证响应格式
-	certResp, err := parseAPIResponse(body, resp.StatusCode)
-	if err != nil {
-		return nil, err
-	}
-
-	if certResp.Code != 1 {
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Code:       certResp.Code,
-			Message:    certResp.Msg,
-		}
-	}
-
-	return certResp.Data, nil
+func (c *Client) ListCertsByDomain(ctx context.Context, domain string) ([]CertData, error) {
+	return c.queryCerts(ctx, domain)
 }
 
 // selectBestCert 从证书列表中选择最佳证书
@@ -247,74 +305,91 @@ func selectBestCert(certs []CertData, targetDomain string) *CertData {
 		return nil
 	}
 
+	targetDomain = util.NormalizeDomain(targetDomain)
+
+	// 将证书数据与预解析的元数据合并为一个结构体，确保排序时索引同步
+	type certWithMeta struct {
+		cert          CertData
+		domains       []string // 预解析的域名列表
+		exactMatch    bool     // 精确匹配
+		wildcardMatch bool     // 通配符匹配
+	}
+
+	items := make([]certWithMeta, len(certs))
+	for i := range certs {
+		domains := parseDomainList(certs[i].Domains)
+		items[i] = certWithMeta{
+			cert:    certs[i],
+			domains: domains,
+			exactMatch: util.NormalizeDomain(certs[i].Domain()) == targetDomain ||
+				isExactMatchList(domains, targetDomain),
+			wildcardMatch: containsDomainList(domains, targetDomain) ||
+				util.MatchDomain(targetDomain, certs[i].Domain()),
+		}
+	}
+
 	// 按优先级排序
-	sort.Slice(certs, func(i, j int) bool {
+	sort.Slice(items, func(i, j int) bool {
 		// 优先 active 状态
-		if certs[i].Status == "active" && certs[j].Status != "active" {
+		if items[i].cert.Status == "active" && items[j].cert.Status != "active" {
 			return true
 		}
-		if certs[i].Status != "active" && certs[j].Status == "active" {
+		if items[i].cert.Status != "active" && items[j].cert.Status == "active" {
 			return false
 		}
 
 		// 优先精确匹配（不含通配符）
-		iExact := certs[i].Domain == targetDomain || isExactMatch(certs[i].Domains, targetDomain)
-		jExact := certs[j].Domain == targetDomain || isExactMatch(certs[j].Domains, targetDomain)
-		if iExact && !jExact {
+		if items[i].exactMatch && !items[j].exactMatch {
 			return true
 		}
-		if !iExact && jExact {
+		if !items[i].exactMatch && items[j].exactMatch {
 			return false
 		}
 
 		// 其次是通配符匹配
-		iMatch := containsDomain(certs[i].Domains, targetDomain) || matchesDomain(certs[i].Domain, targetDomain)
-		jMatch := containsDomain(certs[j].Domains, targetDomain) || matchesDomain(certs[j].Domain, targetDomain)
-		if iMatch && !jMatch {
+		if items[i].wildcardMatch && !items[j].wildcardMatch {
 			return true
 		}
-		if !iMatch && jMatch {
+		if !items[i].wildcardMatch && items[j].wildcardMatch {
 			return false
 		}
 
 		// 按过期时间排序（晚的优先）
-		return certs[i].ExpiresAt > certs[j].ExpiresAt
+		return items[i].cert.ExpiresAt > items[j].cert.ExpiresAt
 	})
 
 	// 只返回 active 状态的证书
-	if certs[0].Status == "active" {
-		return &certs[0]
+	if items[0].cert.Status == "active" {
+		return &items[0].cert
 	}
 
 	return nil
 }
 
-// matchesDomain 检查模式是否匹配目标域名（支持通配符）
-// pattern: *.example.com 匹配 www.example.com, api.example.com
-// pattern: example.com 只匹配 example.com（精确匹配）
-func matchesDomain(pattern, target string) bool {
-	if pattern == target {
-		return true // 精确匹配
+// parseDomainList 解析逗号分隔的域名列表
+func parseDomainList(domains string) []string {
+	if domains == "" {
+		return nil
 	}
-	// 通配符匹配：*.example.com 匹配 www.example.com
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := pattern[1:] // ".example.com"
-		// 目标域名必须以 suffix 结尾，且前面只有一级子域名
-		if strings.HasSuffix(target, suffix) {
-			prefix := target[:len(target)-len(suffix)]
-			// 前缀不能包含点（即只能是单级子域名）
-			if !strings.Contains(prefix, ".") && len(prefix) > 0 {
-				return true
-			}
+	parts := strings.Split(domains, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.TrimSpace(p); d != "" {
+			result = append(result, d)
 		}
 	}
-	return false
+	return result
 }
 
 // containsDomain 检查域名列表是否包含目标域名（支持通配符）
 func containsDomain(domains string, target string) bool {
-	for _, d := range strings.Split(domains, ",") {
-		if matchesDomain(strings.TrimSpace(d), target) {
+	return containsDomainList(parseDomainList(domains), target)
+}
+
+// containsDomainList 检查预解析的域名列表是否包含目标域名（支持通配符）
+func containsDomainList(domains []string, target string) bool {
+	for _, d := range domains {
+		if util.MatchDomain(target, d) {
 			return true
 		}
 	}
@@ -323,8 +398,13 @@ func containsDomain(domains string, target string) bool {
 
 // isExactMatch 检查是否精确匹配（不使用通配符）
 func isExactMatch(domains string, target string) bool {
-	for _, d := range strings.Split(domains, ",") {
-		if strings.TrimSpace(d) == target {
+	return isExactMatchList(parseDomainList(domains), target)
+}
+
+// isExactMatchList 检查预解析的域名列表是否精确匹配
+func isExactMatchList(domains []string, target string) bool {
+	for _, d := range domains {
+		if util.NormalizeDomain(d) == target {
 			return true
 		}
 	}
@@ -334,15 +414,12 @@ func isExactMatch(domains string, target string) bool {
 // CallbackRequest 回调请求
 type CallbackRequest struct {
 	OrderID    int    `json:"order_id"`
-	Domain     string `json:"domain"`
 	Status     string `json:"status"` // success or failure
 	DeployedAt string `json:"deployed_at,omitempty"`
-	ServerType string `json:"server_type,omitempty"`
-	Message    string `json:"message,omitempty"`
 }
 
 // Callback 部署回调
-func (c *Client) Callback(req *CallbackRequest) error {
+func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	apiURL := c.BaseURL + "/callback"
 
 	data, err := json.Marshal(req)
@@ -358,40 +435,40 @@ func (c *Client) Callback(req *CallbackRequest) error {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(httpReq)
+	resp, err := c.doWithRetry(ctx, httpReq)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("回调失败: %d - %s", resp.StatusCode, string(body))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		if err != nil {
+			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, err)
+		}
+		return handleHTTPError(resp.StatusCode, body)
 	}
 
 	return nil
 }
 
-// CSRRequest CSR 提交请求
-type CSRRequest struct {
-	OrderID          int    `json:"order_id,omitempty"`          // 订单 ID（重签时使用）
-	Domain           string `json:"domain"`                      // 主域名
-	CSR              string `json:"csr"`                         // PEM 格式 CSR
+// UpdateRequest 更新/续签请求（POST）
+type UpdateRequest struct {
+	OrderID          int    `json:"order_id"`                    // 订单 ID
+	CSR              string `json:"csr,omitempty"`               // PEM 格式 CSR（空则服务端自动生成）
+	Domains          string `json:"domains,omitempty"`           // 域名（逗号分隔，空则使用当前域名）
 	ValidationMethod string `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
 }
 
-// CSRResponse CSR 提交响应
-type CSRResponse struct {
-	Code int    `json:"code"`
-	Msg  string `json:"msg"`
-	Data struct {
-		OrderID int    `json:"order_id"` // 新建或重签的订单 ID
-		Status  string `json:"status"`   // processing, pending 等
-	} `json:"data"`
+// UpdateResponse 更新响应（返回完整证书数据）
+type UpdateResponse struct {
+	Code int      `json:"code"`
+	Msg  string   `json:"msg"`
+	Data CertData `json:"data"`
 }
 
 // SubmitCSR 提交 CSR 请求签发/重签证书
-func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
+func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResponse, error) {
 	apiURL := c.BaseURL
 
 	data, err := json.Marshal(req)
@@ -407,35 +484,39 @@ func (c *Client) SubmitCSR(req *CSRRequest) (*CSRResponse, error) {
 	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := c.doWithRetry(httpReq)
+	resp, err := c.doWithRetry(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API 返回错误: %d - %s", resp.StatusCode, string(body))
+		return nil, handleHTTPError(resp.StatusCode, body)
 	}
 
-	var csrResp CSRResponse
-	if err := json.Unmarshal(body, &csrResp); err != nil {
+	var updateResp UpdateResponse
+	if err := json.Unmarshal(body, &updateResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
 
-	if csrResp.Code != 1 {
-		return nil, fmt.Errorf("API 错误: %s", csrResp.Msg)
+	if updateResp.Code != 1 {
+		return nil, &APIError{
+			StatusCode: resp.StatusCode,
+			Code:       updateResp.Code,
+			Message:    updateResp.Msg,
+		}
 	}
 
-	return &csrResp, nil
+	return &updateResp, nil
 }
 
-// GetCertByOrderID 按订单 ID 查询证书
-func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
+// queryCerts 统一查询接口，使用 order 参数
+func (c *Client) queryCerts(ctx context.Context, order string) ([]CertData, error) {
 	if c.BaseURL == "" {
 		return nil, fmt.Errorf("部署接口地址未配置")
 	}
@@ -443,8 +524,10 @@ func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
 		return nil, fmt.Errorf("部署 Token 未配置")
 	}
 
-	// 使用 order_id 参数直接查询
-	apiURL := fmt.Sprintf("%s?order_id=%d", c.BaseURL, orderID)
+	apiURL := c.BaseURL
+	if order != "" {
+		apiURL += "?order=" + url.QueryEscape(order)
+	}
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -454,52 +537,103 @@ func (c *Client) GetCertByOrderID(orderID int) (*CertData, error) {
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.doWithRetry(req)
+	resp, err := c.doWithRetry(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Code int    `json:"code"`
-			Msg  string `json:"msg"`
-		}
-		if json.Unmarshal(body, &errResp) == nil && errResp.Msg != "" {
-			return nil, &APIError{
-				StatusCode: resp.StatusCode,
-				Code:       errResp.Code,
-				Message:    errResp.Msg,
-			}
-		}
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Message:    fmt.Sprintf("HTTP %d: 接口请求失败", resp.StatusCode),
-			RawBody:    string(body),
-		}
+		return nil, handleHTTPError(resp.StatusCode, body)
 	}
 
-	certResp, err := parseAPIResponse(body, resp.StatusCode)
+	apiResp, err := parseResponse(body, resp.StatusCode)
 	if err != nil {
 		return nil, err
 	}
 
-	if certResp.Code != 1 {
-		return nil, &APIError{
-			StatusCode: resp.StatusCode,
-			Code:       certResp.Code,
-			Message:    certResp.Msg,
-		}
+	return apiResp.Data.Data, nil
+}
+
+// ListCertsByQuery 批量查询证书（逗号分隔的 ID/域名）
+func (c *Client) ListCertsByQuery(ctx context.Context, query string) ([]CertData, error) {
+	return c.queryCerts(ctx, query)
+}
+
+// ListAllCerts 分页查询全部证书
+func (c *Client) ListAllCerts(ctx context.Context) ([]CertData, error) {
+	if c.BaseURL == "" {
+		return nil, fmt.Errorf("部署接口地址未配置")
+	}
+	if c.Token == "" {
+		return nil, fmt.Errorf("部署 Token 未配置")
 	}
 
-	if len(certResp.Data) == 0 {
+	var allCerts []CertData
+	page := 1
+	pageSize := 100
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("请求被取消: %w", ctx.Err())
+		default:
+		}
+
+		apiURL := fmt.Sprintf("%s?currentPage=%d&pageSize=%d", c.BaseURL, page, pageSize)
+
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("创建请求失败: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.doWithRetry(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("读取响应失败: %w", err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, handleHTTPError(resp.StatusCode, body)
+		}
+
+		apiResp, err := parseResponse(body, resp.StatusCode)
+		if err != nil {
+			return nil, err
+		}
+
+		allCerts = append(allCerts, apiResp.Data.Data...)
+		totalPages := (apiResp.Data.Total + pageSize - 1) / pageSize
+		if page >= totalPages {
+			break
+		}
+		page++
+	}
+
+	return allCerts, nil
+}
+
+// GetCertByOrderID 按订单 ID 查询证书
+func (c *Client) GetCertByOrderID(ctx context.Context, orderID int) (*CertData, error) {
+	certs, err := c.queryCerts(ctx, fmt.Sprintf("%d", orderID))
+	if err != nil {
+		return nil, err
+	}
+	if len(certs) == 0 {
 		return nil, fmt.Errorf("未找到订单 %d", orderID)
 	}
-
-	return &certResp.Data[0], nil
+	return &certs[0], nil
 }

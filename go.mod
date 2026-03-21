@@ -1,4 +1,4 @@
-module cert-deploy
+module sslctlw
 
 go 1.24.0
 
@@ -9,4 +9,7 @@ require (
 	software.sslmate.com/src/go-pkcs12 v0.7.0
 )
 
-require golang.org/x/crypto v0.22.0 // indirect
+require (
+	golang.org/x/crypto v0.47.0 // indirect
+	golang.org/x/net v0.49.0 // indirect
+)

@@ -3,11 +3,12 @@ package cert
 import (
 	"encoding/pem"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"cert-deploy/util"
+	"sslctlw/util"
 )
 
 // InstallResult 安装结果
@@ -30,26 +31,24 @@ func InstallPFX(pfxPath, password string) (*InstallResult, error) {
 		return nil, fmt.Errorf("获取绝对路径失败: %v", err)
 	}
 
-	// 使用 PowerShell 导入证书
+	// 使用 PowerShell 导入证书，通过环境变量传递密码
+	escapedPath := util.EscapePowerShellString(absPath)
 	script := fmt.Sprintf(`
-$password = ConvertTo-SecureString -String '%s' -Force -AsPlainText
+$password = ConvertTo-SecureString -String $env:PFX_PASSWORD -Force -AsPlainText
 $cert = Import-PfxCertificate -FilePath '%s' -CertStoreLocation Cert:\LocalMachine\My -Password $password -Exportable
 if ($cert) {
     Write-Output "Thumbprint: $($cert.Thumbprint)"
 } else {
     Write-Error "导入失败"
 }
-`, escapePassword(password), absPath)
+`, escapedPath)
 
-	outputStr, err := util.RunPowerShellCombined(script)
+	outputStr, err := util.RunPowerShellWithEnv(script, map[string]string{"PFX_PASSWORD": password})
 
 	if err != nil {
 		// 简化错误信息
 		errMsg := simplifyPFXError(outputStr)
-		return &InstallResult{
-			Success:      false,
-			ErrorMessage: errMsg,
-		}, nil
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	// 解析指纹
@@ -67,7 +66,7 @@ if ($cert) {
 		return &InstallResult{
 			Success:      false,
 			ErrorMessage: "导入成功但未能获取证书指纹",
-		}, nil
+		}, fmt.Errorf("导入成功但未能获取证书指纹")
 	}
 
 	return &InstallResult{
@@ -103,12 +102,14 @@ func installPEMWithGo(certPath, keyPath, password string) (*InstallResult, error
 	leafPEM, chainPEM := splitPEMCertChain(string(certBytes))
 	pfxPath, err := PEMToPFX(leafPEM, string(keyBytes), chainPEM, password)
 	if err != nil {
-		return &InstallResult{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("convert pem to pfx failed: %v", err),
-		}, nil
+		return nil, fmt.Errorf("convert pem to pfx failed: %w", err)
 	}
-	defer os.Remove(pfxPath)
+	defer func() {
+		if err := os.Remove(pfxPath); err != nil && !os.IsNotExist(err) {
+			// 记录临时文件清理失败，但不影响主流程
+			log.Printf("警告: 清理临时 PFX 文件失败 %s: %v", pfxPath, err)
+		}
+	}()
 
 	return InstallPFX(pfxPath, password)
 }
@@ -144,13 +145,6 @@ func splitPEMCertChain(pemData string) (string, string) {
 	return leaf, chain.String()
 }
 
-// escapePassword 转义密码中的特殊字符（用于 PowerShell 单引号字符串）
-func escapePassword(password string) string {
-	// PowerShell 单引号字符串中，只有单引号需要转义（'' 表示一个单引号）
-	// $ 和反引号在单引号字符串中是字面字符，不需要转义
-	return strings.ReplaceAll(password, "'", "''")
-}
-
 // simplifyPFXError 简化 PFX 导入错误信息
 func simplifyPFXError(output string) string {
 	outputLower := strings.ToLower(output)
@@ -169,9 +163,9 @@ func simplifyPFXError(output string) string {
 		return "无效的证书文件格式"
 	}
 
-	// 如果错误信息太长，截取前100个字符
+	// 如果错误信息太长，截取前100字节（UTF-8 安全）
 	if len(output) > 100 {
-		return "导入失败: " + output[:100] + "..."
+		return "导入失败: " + util.TruncateString(output, 100) + "..."
 	}
 	return "导入失败: " + output
 }

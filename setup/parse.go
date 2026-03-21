@@ -1,0 +1,121 @@
+package setup
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Options 一键部署选项
+type Options struct {
+	URL   string // API 地址
+	Token string // API Token
+	Order string // 逗号分隔的订单 ID，空则查询全部
+}
+
+// ParseCommand 解析部署命令字符串
+// 支持格式:
+//
+//	sslctlw setup --url <url> --token <token> [--order <ids>]
+//	sslctl setup --url <url> --token <token> [--order <ids>]
+//	--url <url> --token <token> [--order <ids>]
+func ParseCommand(input string) (*Options, error) {
+	// 合并多行为一行
+	input = strings.ReplaceAll(input, "\r\n", " ")
+	input = strings.ReplaceAll(input, "\n", " ")
+	input = strings.TrimSpace(input)
+
+	if input == "" {
+		return nil, fmt.Errorf("命令为空")
+	}
+
+	// 分词（支持引号）
+	args := tokenize(input)
+
+	// 跳过程序名和 setup 子命令
+	i := 0
+	for i < len(args) {
+		lower := strings.ToLower(args[i])
+		if lower == "sslctlw" || lower == "sslctlw.exe" || lower == "sslctl" || lower == "setup" {
+			i++
+			continue
+		}
+		break
+	}
+
+	opts := &Options{}
+
+	for i < len(args) {
+		arg := args[i]
+		switch arg {
+		case "--url":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--url 需要参数")
+			}
+			i++
+			opts.URL = args[i]
+		case "--token":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--token 需要参数")
+			}
+			i++
+			opts.Token = args[i]
+		case "--order":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--order 需要参数")
+			}
+			i++
+			opts.Order = args[i]
+		case "--debug":
+			// 忽略
+		default:
+			return nil, fmt.Errorf("未知参数: %s", arg)
+		}
+		i++
+	}
+
+	if opts.URL == "" {
+		return nil, fmt.Errorf("缺少 --url 参数")
+	}
+	if opts.Token == "" {
+		return nil, fmt.Errorf("缺少 --token 参数")
+	}
+
+	return opts, nil
+}
+
+// tokenize 将命令行字符串分割为 token（支持引号）
+func tokenize(s string) []string {
+	var tokens []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inQuote {
+			if c == quoteChar {
+				inQuote = false
+			} else {
+				current.WriteByte(c)
+			}
+		} else {
+			if c == '"' || c == '\'' {
+				inQuote = true
+				quoteChar = c
+			} else if c == ' ' || c == '\t' {
+				if current.Len() > 0 {
+					tokens = append(tokens, current.String())
+					current.Reset()
+				}
+			} else {
+				current.WriteByte(c)
+			}
+		}
+	}
+
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+
+	return tokens
+}

@@ -16,25 +16,29 @@ Authorization: Bearer <deploy-token>
 GET /api/deploy/cert?domain=example.com
 ```
 
-**响应** (证书列表):
+**响应** (分页格式):
 
 ```json
 {
   "code": 1,
   "msg": "success",
-  "data": [
-    {
-      "id": 123,
-      "domain": "example.com",
-      "domains": ["example.com", "www.example.com"],
-      "status": "active",
-      "certificate": "-----BEGIN CERTIFICATE-----...",
-      "private_key": "-----BEGIN PRIVATE KEY-----...",
-      "ca_certificate": "-----BEGIN CERTIFICATE-----...",
-      "expires_at": "2025-12-31",
-      "created_at": "2025-01-01"
-    }
-  ]
+  "data": {
+    "data": [
+      {
+        "order_id": 123,
+        "domains": "example.com,www.example.com",
+        "status": "active",
+        "certificate": "-----BEGIN CERTIFICATE-----...",
+        "private_key": "-----BEGIN PRIVATE KEY-----...",
+        "ca_certificate": "-----BEGIN CERTIFICATE-----...",
+        "expires_at": "2025-12-31",
+        "issued_at": "2025-01-01"
+      }
+    ],
+    "currentPage": 1,
+    "pageSize": 20,
+    "total": 1
+  }
 }
 ```
 
@@ -50,7 +54,9 @@ GET /api/deploy/cert?order_id=123
 
 返回格式同上。
 
-### 提交 CSR（本地私钥模式）
+### 提交 CSR（本机提交模式）
+
+CSR 只需要 CommonName（主域名），不需要 SAN。服务端根据订单配置自动添加 SAN。
 
 ```
 POST /api/deploy/csr
@@ -83,12 +89,9 @@ POST /api/deploy/callback
 Content-Type: application/json
 
 {
-  "cert_id": 123,
-  "domain": "example.com",
+  "order_id": 123,
   "status": "success",
-  "deployed_at": "2025-01-01 12:00:00",
-  "server_type": "IIS",
-  "message": ""
+  "deployed_at": "2025-01-01 12:00:00"
 }
 ```
 
@@ -135,20 +138,22 @@ func matchesDomain(pattern, target string) bool {
 
 ```go
 client := api.NewClient(baseURL, token)
+ctx := context.Background()
 
 // 查询并选择最佳证书
-cert, err := client.GetCertByDomain("example.com")
+cert, err := client.GetCertByDomain(ctx, "example.com")
 
 // 查询证书列表
-certs, err := client.ListCertsByDomain("example.com")
+certs, err := client.ListCertsByDomain(ctx, "example.com")
+
+// 按订单 ID 查询
+cert, err := client.GetCertByOrderID(ctx, orderID)
 
 // 部署回调
 client.Callback(&api.CallbackRequest{
-    CertID:     cert.ID,
-    Domain:     "example.com",
+    OrderID:    cert.OrderID,
     Status:     "success",
     DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
-    ServerType: "IIS",
 })
 ```
 
@@ -178,14 +183,14 @@ client.Callback(&api.CallbackRequest{
 | `domain` | 主域名（common_name） |
 | `domains` | SAN 域名列表 |
 | `order_id` | 订单 ID |
-| `use_local_key` | 本地私钥模式（true）或拉取模式（false） |
-| `renew_days_local` | 本地私钥模式：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
-| `renew_days_fetch` | 拉取模式：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
+| `use_local_key` | 本机提交模式（true）或自动签发模式（false） |
+| `renew_days_local` | 本机提交：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
+| `renew_days_fetch` | 自动签发：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
 | `check_interval` | 定时检测间隔（小时，默认 6） |
 
 ## 部署模式
 
-### 拉取模式（UseLocalKey = false，默认）
+### 自动签发模式（UseLocalKey = false，默认）
 
 ```
 查询 OrderID 对应证书
@@ -197,7 +202,7 @@ client.Callback(&api.CallbackRequest{
 
 **设计意图**：服务端 14 天自动续签，客户端 13 天开始拉取，确保拿到新证书。
 
-### 本地私钥模式（UseLocalKey = true）
+### 本机提交模式（UseLocalKey = true）
 
 ```
 检查 OrderID > 0?
@@ -261,6 +266,18 @@ func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 
 - 仅对**网络错误**重试，业务错误不重试
 - 重试间隔递增：1秒、2秒、3秒
+
+### HTTPS 强制
+
+`api.NewClient` 会检查 BaseURL 是否使用 HTTPS。非 HTTPS 且非 localhost 的 URL 会输出警告日志。生产环境应始终使用 HTTPS 传输 Token 和证书私钥。
+
+### 响应体大小限制
+
+所有 HTTP 响应读取使用 `io.LimitReader` 限制为 10MB（`maxResponseSize`），防止异常响应耗尽内存。超过限制时 `io.ReadAll` 会截断。
+
+### sendCallback goroutine 生命周期
+
+`deploy/auto.go` 中的 `sendCallback` 在 goroutine 中执行回调请求。`Deployer` 使用 `callbackWg sync.WaitGroup` 跟踪所有活跃的回调 goroutine。`CheckAndDeploy` 在统计结果前调用 `deployer.WaitCallbacks()` 确保所有回调完成，避免 `-auto` 模式下 `os.Exit` 截断未完成的回调。
 
 ### 定时任务重试（延迟）
 

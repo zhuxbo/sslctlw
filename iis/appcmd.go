@@ -3,12 +3,13 @@ package iis
 import (
 	"encoding/xml"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"cert-deploy/util"
+	"sslctlw/util"
 )
 
 // validateBindingParams 验证绑定参数
@@ -107,7 +108,10 @@ func ScanSites() ([]SiteInfo, error) {
 
 	sites := make([]SiteInfo, 0, len(result.Sites))
 	for _, s := range result.Sites {
-		id, _ := strconv.ParseInt(s.ID, 10, 64)
+		id, parseErr := strconv.ParseInt(s.ID, 10, 64)
+		if parseErr != nil {
+			log.Printf("警告: 站点 %s 的 ID %q 解析失败: %v", s.Name, s.ID, parseErr)
+		}
 		site := SiteInfo{
 			ID:       id,
 			Name:     s.Name,
@@ -155,7 +159,11 @@ func parseBindings(bindingsStr string) []BindingInfo {
 			ip = "0.0.0.0"
 		}
 
-		port, _ := strconv.Atoi(colonParts[1])
+		port, parseErr := strconv.Atoi(colonParts[1])
+		if parseErr != nil {
+			log.Printf("警告: 绑定端口 %q 解析失败: %v", colonParts[1], parseErr)
+			continue
+		}
 
 		host := ""
 		if len(colonParts) > 2 {
@@ -199,8 +207,8 @@ func AddHttpsBinding(siteName, host string, port int) error {
 	return nil
 }
 
-// AddHttpsBindingWithCert 添加 HTTPS 绑定并绑定证书（启用 SNI）
-func AddHttpsBindingWithCert(siteName, host string, port int, certHash string) error {
+// AddHttpsBindingIfNotExists 添加 HTTPS 绑定（启用 SNI），若已存在则忽略
+func AddHttpsBindingIfNotExists(siteName, host string, port int) error {
 	if port == 0 {
 		port = 443
 	}
@@ -209,13 +217,6 @@ func AddHttpsBindingWithCert(siteName, host string, port int, certHash string) e
 	if err := validateBindingParams(siteName, host, port); err != nil {
 		return err
 	}
-	if err := util.ValidateThumbprint(certHash); err != nil {
-		return fmt.Errorf("无效的证书指纹: %w", err)
-	}
-
-	// 清理证书哈希
-	certHash = strings.ReplaceAll(certHash, " ", "")
-	certHash = strings.ReplaceAll(certHash, "-", "")
 
 	bindingInfo := fmt.Sprintf("*:%d:%s", port, host)
 	// sslFlags=1 表示启用 SNI
@@ -340,7 +341,7 @@ func FindMatchingBindings(certDomains []string) (httpsMatches []HttpBindingMatch
 			// 检查绑定的域名是否匹配证书的任意域名
 			matchedDomain := ""
 			for _, certDomain := range certDomains {
-				if MatchDomainForBinding(binding.Host, certDomain) {
+				if util.MatchDomain(binding.Host, certDomain) {
 					matchedDomain = certDomain
 					break
 				}
@@ -398,7 +399,9 @@ func GetSitePhysicalPath(siteName string) (string, error) {
 	}
 
 	// 转义 PowerShell 字符串
-	escapedSiteName := util.EscapePowerShellString(siteName)
+	// 双引号字符串使用双引号转义，单引号字符串使用单引号转义
+	escapedForDouble := util.EscapePowerShellDoubleQuoteString(siteName)
+	escapedForSingle := util.EscapePowerShellString(siteName)
 
 	// 使用 PowerShell 获取站点的物理路径
 	script := fmt.Sprintf(`
@@ -412,7 +415,7 @@ if ($site) {
         $site.physicalPath
     }
 }
-`, escapedSiteName, escapedSiteName)
+`, escapedForDouble, escapedForSingle)
 
 	output, err := util.RunPowerShell(script)
 	if err != nil {
@@ -477,11 +480,11 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 		return "", "", err
 	}
 
-	domain = strings.ToLower(strings.TrimSpace(domain))
+	normalizedDomain := util.NormalizeDomain(domain)
 
 	for _, site := range sites {
 		for _, binding := range site.Bindings {
-			if strings.EqualFold(binding.Host, domain) {
+			if util.NormalizeDomain(binding.Host) == normalizedDomain {
 				path, err := GetSitePhysicalPath(site.Name)
 				if err != nil {
 					continue
@@ -523,33 +526,3 @@ func GetSitePhysicalPathByDomain(domain string) (string, string, error) {
 	return "", "", fmt.Errorf("未找到域名 %s 对应的站点", domain)
 }
 
-// MatchDomainForBinding 检查绑定域名是否匹配证书域名
-// bindingHost: IIS 绑定的域名 (如 www.example.com)
-// certDomain: 证书的域名 (如 *.example.com 或 www.example.com)
-func MatchDomainForBinding(bindingHost, certDomain string) bool {
-	bindingHost = strings.ToLower(strings.TrimSpace(bindingHost))
-	certDomain = strings.ToLower(strings.TrimSpace(certDomain))
-
-	if bindingHost == "" || certDomain == "" {
-		return false
-	}
-
-	// 精确匹配
-	if bindingHost == certDomain {
-		return true
-	}
-
-	// 通配符证书匹配: *.example.com 匹配 www.example.com, api.example.com 等
-	if strings.HasPrefix(certDomain, "*.") {
-		suffix := certDomain[1:] // ".example.com"
-		if strings.HasSuffix(bindingHost, suffix) {
-			// 确保只有一级子域名 (www.example.com 匹配，但 a.b.example.com 不匹配)
-			prefix := bindingHost[:len(bindingHost)-len(suffix)]
-			if !strings.Contains(prefix, ".") && prefix != "" {
-				return true
-			}
-		}
-	}
-
-	return false
-}

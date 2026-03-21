@@ -1,0 +1,6 @@
+.git/
+*.exe
+*.syso
+ui/
+skills/
+sslctlw/
