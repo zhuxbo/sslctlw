@@ -26,11 +26,11 @@ func TestAPIConnection(t *testing.T) {
 			if cert.OrderID == 0 {
 				t.Errorf("证书 %d: OrderID 为空", i)
 			}
-			if cert.Domain == "" {
+			if cert.Domain() == "" {
 				t.Errorf("证书 %d: Domain 为空", i)
 			}
 			t.Logf("证书 %d: OrderID=%d, Domain=%s, Status=%s, ExpiresAt=%s",
-				i, cert.OrderID, cert.Domain, cert.Status, cert.ExpiresAt)
+				i, cert.OrderID, cert.Domain(), cert.Status, cert.ExpiresAt)
 		}
 	})
 
@@ -48,8 +48,8 @@ func TestAPIConnection(t *testing.T) {
 		// 找一个 active 状态的证书
 		var testDomain string
 		for _, c := range certs {
-			if c.Status == "active" && c.Domain != "" {
-				testDomain = c.Domain
+			if c.Status == "active" && c.Domain() != "" {
+				testDomain = c.Domain()
 				break
 			}
 		}
@@ -63,14 +63,14 @@ func TestAPIConnection(t *testing.T) {
 			t.Fatalf("按域名获取证书失败: %v", err)
 		}
 
-		t.Logf("获取到证书: OrderID=%d, Domain=%s", cert.OrderID, cert.Domain)
+		t.Logf("获取到证书: OrderID=%d, Domain=%s", cert.OrderID, cert.Domain())
 
 		// 验证证书内容
 		if cert.Certificate == "" {
 			t.Error("证书内容为空")
 		}
 		if cert.PrivateKey == "" {
-			t.Log("私钥为空（可能是本地私钥模式）")
+			t.Log("私钥为空（可能是本机提交模式）")
 		}
 	})
 
@@ -93,7 +93,7 @@ func TestAPIConnection(t *testing.T) {
 		}
 
 		t.Logf("获取到证书: OrderID=%d, Domain=%s, Status=%s",
-			cert.OrderID, cert.Domain, cert.Status)
+			cert.OrderID, cert.Domain(), cert.Status)
 
 		if cert.OrderID != testOrderID {
 			t.Errorf("订单ID不匹配: 期望 %d, 实际 %d", testOrderID, cert.OrderID)

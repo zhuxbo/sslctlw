@@ -43,7 +43,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	// 按钮行
 	btnToggle := ui.NewButton(dlg, ui.OptsButton().Text("启用/停用").Position(ui.Dpi(20, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
 	btnRemove := ui.NewButton(dlg, ui.OptsButton().Text("删除").Position(ui.Dpi(95, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
-	btnToggleLocalKey := ui.NewButton(dlg, ui.OptsButton().Text("本地私钥").Position(ui.Dpi(150, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
+	btnToggleLocalKey := ui.NewButton(dlg, ui.OptsButton().Text("本机提交").Position(ui.Dpi(150, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
 	btnToggleValidation := ui.NewButton(dlg, ui.OptsButton().Text("验证方法").Position(ui.Dpi(225, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
 	btnRefresh := ui.NewButton(dlg, ui.OptsButton().Text("刷新").Position(ui.Dpi(300, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
 
@@ -89,7 +89,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 		lstCerts.Cols.Add("域名", ui.DpiX(170))
 		lstCerts.Cols.Add("过期时间", ui.DpiX(85))
 		lstCerts.Cols.Add("状态", ui.DpiX(45))
-		lstCerts.Cols.Add("本地私钥", ui.DpiX(60))
+		lstCerts.Cols.Add("本机提交", ui.DpiX(60))
 		lstCerts.Cols.Add("验证方法", ui.DpiX(60))
 
 		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
@@ -108,7 +108,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			btnToggle.Hwnd().EnableWindow(true)
 			btnRemove.Hwnd().EnableWindow(true)
 			btnToggleLocalKey.Hwnd().EnableWindow(true)
-			// 只有启用本地私钥时才能切换验证方法
+			// 只有启用本机提交时才能切换验证方法
 			btnToggleValidation.Hwnd().EnableWindow(cfg.Certificates[selectedIdx].UseLocalKey)
 		} else {
 			btnToggle.Hwnd().EnableWindow(false)
@@ -150,11 +150,11 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 		}
 	})
 
-	// 切换本地私钥
+	// 切换本机提交
 	btnToggleLocalKey.On().BnClicked(func() {
 		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
 			cfg.Certificates[selectedIdx].UseLocalKey = !cfg.Certificates[selectedIdx].UseLocalKey
-			// 关闭本地私钥时，清除验证方法
+			// 关闭本机提交时，清除验证方法
 			if !cfg.Certificates[selectedIdx].UseLocalKey {
 				cfg.Certificates[selectedIdx].ValidationMethod = ""
 			}

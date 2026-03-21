@@ -38,7 +38,7 @@ func TestCertInstall(t *testing.T) {
 		t.Skip("没有可用的证书（需要 active 状态且包含私钥）")
 	}
 
-	t.Logf("使用证书: OrderID=%d, Domain=%s", testCert.OrderID, testCert.Domain)
+	t.Logf("使用证书: OrderID=%d, Domain=%s", testCert.OrderID, testCert.Domain())
 
 	t.Run("PEMToPFX", func(t *testing.T) {
 		// 测试 PEM 转 PFX

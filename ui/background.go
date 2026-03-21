@@ -293,18 +293,21 @@ func (t *BackgroundTask) endCheck() {
 func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 	results := make([]CertExpiryInfo, 0)
 
-	token := cfg.GetToken()
-	if token == "" {
-		return results
-	}
-
-	client := api.NewClient(cfg.APIBaseURL, token)
-
 	for _, certCfg := range cfg.Certificates {
 		if !certCfg.Enabled {
 			continue
 		}
 
+		token := certCfg.API.GetToken()
+		if token == "" || certCfg.API.URL == "" {
+			results = append(results, CertExpiryInfo{
+				Domain: certCfg.Domain,
+				Error:  "未配置 API",
+			})
+			continue
+		}
+
+		client := api.NewClient(certCfg.API.URL, token)
 		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
 		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
@@ -321,7 +324,7 @@ func CheckCertExpiry(cfg *config.Config) []CertExpiryInfo {
 
 		results = append(results, CertExpiryInfo{
 			Domain:    certCfg.Domain,
-			CertName:  certData.Domain,
+			CertName:  certData.Domain(),
 			ExpiresAt: expiresAt,
 			DaysLeft:  daysLeft,
 			Status:    certData.Status,

@@ -42,10 +42,10 @@ func TestFullDeployFlow(t *testing.T) {
 		t.Skip("没有可用的证书（需要 active 状态且包含私钥）")
 	}
 
-	t.Logf("选择证书: OrderID=%d, Domain=%s", testCert.OrderID, testCert.Domain)
+	t.Logf("选择证书: OrderID=%d, Domain=%s", testCert.OrderID, testCert.Domain())
 
 	// 检查是否是通配符域名
-	testHostname := testCert.Domain
+	testHostname := testCert.Domain()
 	if len(testHostname) > 0 && testHostname[0] == '*' {
 		// 通配符域名不能直接用于 SNI 绑定，使用替代域名
 		testHostname = "test" + testHostname[1:] // *.example.com -> test.example.com
@@ -248,7 +248,7 @@ func TestDeployMultipleDomains(t *testing.T) {
 	// 获取证书的所有域名
 	domains := testCert.GetDomainList()
 	if len(domains) == 0 {
-		domains = []string{testCert.Domain}
+		domains = []string{testCert.Domain()}
 	}
 
 	t.Logf("证书域名: %v", domains)
@@ -303,8 +303,8 @@ func TestWildcardCertWithIPBinding(t *testing.T) {
 		if certs[i].Status == "active" &&
 			certs[i].Certificate != "" &&
 			certs[i].PrivateKey != "" &&
-			len(certs[i].Domain) > 0 &&
-			certs[i].Domain[0] == '*' {
+			len(certs[i].Domain()) > 0 &&
+			certs[i].Domain()[0] == '*' {
 			wildcardCert = &certs[i]
 			break
 		}
@@ -314,7 +314,7 @@ func TestWildcardCertWithIPBinding(t *testing.T) {
 		t.Skip("没有可用的通配符证书")
 	}
 
-	t.Logf("使用通配符证书: %s (OrderID=%d)", wildcardCert.Domain, wildcardCert.OrderID)
+	t.Logf("使用通配符证书: %s (OrderID=%d)", wildcardCert.Domain(), wildcardCert.OrderID)
 
 	// 转换并安装证书
 	pfxPath, err := cert.PEMToPFX(wildcardCert.Certificate, wildcardCert.PrivateKey, wildcardCert.CACert, "")
@@ -411,7 +411,7 @@ func TestCertificateReplacement(t *testing.T) {
 	}
 	cleanup.AddCertificate(result1.Thumbprint)
 
-	testHostname := cert1.Domain
+	testHostname := cert1.Domain()
 	// 通配符域名转换为测试域名
 	if len(testHostname) > 0 && testHostname[0] == '*' {
 		testHostname = "test" + testHostname[1:]

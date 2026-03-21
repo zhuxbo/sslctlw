@@ -1,15 +1,23 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"sslctlw/cert"
 	"sslctlw/config"
 	"sslctlw/deploy"
+	"sslctlw/diagnose"
+	"sslctlw/iis"
+	"sslctlw/setup"
 	"sslctlw/ui"
+	"sslctlw/upgrade"
+	"sslctlw/util"
 )
 
 var (
@@ -17,104 +25,364 @@ var (
 )
 
 func main() {
-	// 命令行参数
-	autoMode := flag.Bool("auto", false, "自动部署模式（用于计划任务）")
-	debugMode := flag.Bool("debug", false, "启用调试模式（输出到 debug.log）")
-	showVersion := flag.Bool("version", false, "显示版本号")
-	showHelp := flag.Bool("help", false, "显示帮助")
+	// 无参数 → GUI 模式
+	if len(os.Args) <= 1 {
+		util.HideConsole()
+		ui.SetVersion(version)
+		ui.RunApp()
+		return
+	}
 
-	flag.Parse()
+	args := os.Args[1:]
 
-	if *showVersion {
+	// --debug 仅用于 GUI 模式
+	if len(args) > 0 && args[0] == "--debug" {
+		args = args[1:]
+		if len(args) == 0 {
+			util.HideConsole()
+			ui.EnableDebugMode()
+			ui.SetVersion(version)
+			ui.RunApp()
+			return
+		}
+	}
+
+	cmd := strings.ToLower(args[0])
+	cmdArgs := args[1:]
+
+	switch cmd {
+	case "setup":
+		runSetup(cmdArgs)
+	case "scan":
+		runScan(cmdArgs)
+	case "deploy":
+		runDeploy(cmdArgs)
+	case "status":
+		runStatus()
+	case "upgrade":
+		runUpgrade(cmdArgs)
+	case "diagnose":
+		diagnose.Run(version)
+	case "uninstall":
+		runUninstall(cmdArgs)
+	case "version":
 		fmt.Printf("sslctlw v%s\n", version)
-		return
-	}
-
-	if *showHelp {
+	case "help", "--help", "-help", "-h":
 		printUsage()
-		return
+	default:
+		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", cmd)
+		printUsage()
+		os.Exit(1)
 	}
-
-	if *autoMode {
-		// 自动部署模式
-		runAutoDeploy()
-		return
-	}
-
-	// 启用调试模式
-	if *debugMode {
-		ui.EnableDebugMode()
-	}
-
-	// 设置版本号
-	ui.SetVersion(version)
-
-	// GUI 模式
-	ui.RunApp()
 }
 
-// runAutoDeploy 运行自动部署
-func runAutoDeploy() {
-	// 设置日志到配置目录（权限 0600 - 仅所有者可读写）
-	logPath := filepath.Join(config.GetLogDir(), "deploy.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		// 日志文件打开失败时输出到 stderr 并记录警告
-		fmt.Fprintf(os.Stderr, "警告: 无法打开日志文件 %s: %v，日志将输出到 stderr\n", logPath, err)
-	} else {
-		defer logFile.Close()
-		// 如果是新文件，写入 UTF-8 BOM
-		info, statErr := logFile.Stat()
-		if statErr == nil && info != nil && info.Size() == 0 {
-			if _, writeErr := logFile.Write([]byte{0xEF, 0xBB, 0xBF}); writeErr != nil {
-				log.Printf("警告: 写入 UTF-8 BOM 失败: %v", writeErr)
-			}
-		}
-		log.SetOutput(logFile)
+// runSetup 执行一键部署
+func runSetup(args []string) {
+	if err := setup.RunCLI(args); err != nil {
+		fmt.Fprintf(os.Stderr, "setup 失败: %v\n", err)
+		os.Exit(1)
 	}
+}
 
-	log.Printf("========== 开始自动部署 ==========")
+// runScan 扫描 IIS 站点
+func runScan(args []string) {
+	fs := flag.NewFlagSet("scan", flag.ExitOnError)
+	sslOnly := fs.Bool("ssl-only", false, "仅显示已配置 SSL 的站点")
+	fs.Parse(args)
 
-	if err := deploy.CheckAndDeploy(); err != nil {
-		log.Printf("部署失败: %v", err)
+	sites, err := iis.ScanSites()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "扫描 IIS 站点失败: %v\n", err)
 		os.Exit(1)
 	}
 
-	log.Printf("========== 自动部署完成 ==========")
+	if len(sites) == 0 {
+		fmt.Println("未找到 IIS 站点")
+		return
+	}
+
+	for _, site := range sites {
+		hasSSL := false
+		var bindingStrs []string
+		for _, b := range site.Bindings {
+			info := fmt.Sprintf("%s/%s:%d", b.Protocol, b.Host, b.Port)
+			bindingStrs = append(bindingStrs, info)
+			if b.HasSSL {
+				hasSSL = true
+			}
+		}
+
+		if *sslOnly && !hasSSL {
+			continue
+		}
+
+		ssl := ""
+		if hasSSL {
+			ssl = " [SSL]"
+		}
+		fmt.Printf("%-30s ID:%-5d %s%s\n", site.Name, site.ID, strings.Join(bindingStrs, ", "), ssl)
+	}
 }
 
-// printUsage 打印使用说明
+// runDeploy 部署证书
+func runDeploy(args []string) {
+	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	all := fs.Bool("all", false, "部署所有已配置的证书")
+	certID := fs.Int("cert", 0, "部署指定订单 ID 的证书")
+	fs.Parse(args)
+
+	if *all {
+		// deploy --all: 自动部署所有
+		setupDeployLog()
+		log.Printf("========== 开始自动部署 ==========")
+		if err := deploy.CheckAndDeploy(); err != nil {
+			log.Printf("部署失败: %v", err)
+			fmt.Fprintf(os.Stderr, "部署失败: %v\n", err)
+			os.Exit(1)
+		}
+		log.Printf("========== 自动部署完成 ==========")
+	} else if *certID > 0 {
+		// deploy --cert <id>: 部署单个证书
+		if err := deploySingleCert(*certID); err != nil {
+			fmt.Fprintf(os.Stderr, "部署失败: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "请指定 --all 或 --cert <order_id>")
+		os.Exit(1)
+	}
+}
+
+// deploySingleCert 部署单个证书
+func deploySingleCert(orderID int) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("加载配置失败: %v", err)
+	}
+
+	certCfg := cfg.GetCertificateByOrderID(orderID)
+	if certCfg == nil {
+		return fmt.Errorf("未找到订单 %d 的配置", orderID)
+	}
+
+	client, err := deploy.NewClientForCert(certCfg)
+	if err != nil {
+		return err
+	}
+
+	store := cert.NewOrderStore()
+	deployer := deploy.DefaultDeployer(cfg, store)
+
+	// 创建单证书配置进行部署
+	singleCfg := &config.Config{
+		Certificates:   []config.CertConfig{*certCfg},
+		RenewDaysFetch: cfg.RenewDaysFetch,
+		RenewDaysLocal: cfg.RenewDaysLocal,
+	}
+	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
+	results := deploy.AutoDeploy(singleCfg, deployer)
+	deployer.WaitCallbacks()
+
+	for _, r := range results {
+		if r.Success {
+			fmt.Printf("[成功] %s: %s\n", r.Domain, r.Message)
+		} else {
+			fmt.Printf("[失败] %s: %s\n", r.Domain, r.Message)
+		}
+	}
+
+	return nil
+}
+
+// runStatus 显示状态
+func runStatus() {
+	fmt.Printf("sslctlw v%s\n\n", version)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(cfg.Certificates) == 0 {
+		fmt.Println("未配置任何证书")
+		return
+	}
+
+	fmt.Printf("已配置 %d 个证书:\n", len(cfg.Certificates))
+	for _, c := range cfg.Certificates {
+		status := "禁用"
+		if c.Enabled {
+			status = "启用"
+		}
+		mode := "拉取"
+		if c.UseLocalKey {
+			mode = "本地私钥"
+		}
+		hasAPI := "无"
+		if c.API.URL != "" {
+			hasAPI = "已配置"
+		}
+		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s\n",
+			c.Domain, c.OrderID, c.ExpiresAt, status, mode, hasAPI)
+	}
+
+	// 计划任务状态
+	fmt.Println()
+	taskName := cfg.TaskName
+	if taskName == "" {
+		taskName = config.DefaultTaskName
+	}
+	if util.IsTaskExists(taskName) {
+		fmt.Printf("计划任务: %s (已创建)\n", taskName)
+	} else {
+		fmt.Printf("计划任务: %s (未创建)\n", taskName)
+	}
+}
+
+// runUpgrade 升级
+func runUpgrade(args []string) {
+	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
+	check := fs.Bool("check", false, "仅检查更新")
+	fs.Parse(args)
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	upgradeCfg := cfg.GetUpgradeConfig()
+	uCfg := &upgrade.Config{
+		Enabled:       upgradeCfg.Enabled,
+		Channel:       upgrade.Channel(upgradeCfg.Channel),
+		CheckInterval: upgradeCfg.CheckInterval,
+		LastCheck:     upgradeCfg.LastCheck,
+		ReleaseURL:    upgradeCfg.ReleaseURL,
+	}
+	upgrader := upgrade.NewUpgrader(uCfg)
+
+	ctx := context.Background()
+	info, err := upgrader.CheckForUpdate(ctx, version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "检查更新失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if info == nil {
+		fmt.Println("当前已是最新版本")
+		return
+	}
+
+	fmt.Printf("发现新版本: %s\n", info.Version)
+	if *check {
+		return
+	}
+
+	fmt.Println("正在下载更新...")
+	newExePath, _, err := upgrader.DownloadAndVerify(ctx, info)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "下载失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("正在安装更新...")
+	if err := upgrader.ApplyUpdate(ctx, newExePath, info.Version); err != nil {
+		fmt.Fprintf(os.Stderr, "安装失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("更新成功，请重启程序")
+}
+
+// runUninstall 卸载
+func runUninstall(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	purge := fs.Bool("purge", false, "同时删除配置文件和数据")
+	fs.Parse(args)
+
+	// 删除计划任务
+	taskName := config.DefaultTaskName
+	if util.IsTaskExists(taskName) {
+		if err := util.DeleteTask(taskName); err != nil {
+			fmt.Fprintf(os.Stderr, "删除计划任务失败: %v\n", err)
+		} else {
+			fmt.Println("已删除计划任务:", taskName)
+		}
+	}
+
+	if *purge {
+		dataDir := config.GetDataDir()
+		if err := os.RemoveAll(dataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "删除数据目录失败: %v\n", err)
+		} else {
+			fmt.Println("已删除数据目录:", dataDir)
+		}
+	}
+
+	fmt.Println("卸载完成")
+}
+
+// setupDeployLog 设置部署日志
+func setupDeployLog() {
+	logPath := filepath.Join(config.GetLogDir(), "deploy.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "警告: 无法打开日志文件 %s: %v\n", logPath, err)
+		return
+	}
+	// 如果是新文件，写入 UTF-8 BOM
+	info, statErr := logFile.Stat()
+	if statErr == nil && info != nil && info.Size() == 0 {
+		logFile.Write([]byte{0xEF, 0xBB, 0xBF})
+	}
+	log.SetOutput(logFile)
+}
+
+// printUsage 打印帮助
 func printUsage() {
 	fmt.Printf(`IIS 证书部署工具 v%s
 
 用法:
-  sslctlw.exe [选项]
+  sslctlw <command> [options]
 
-选项:
-  -auto      自动部署模式（用于计划任务）
-  -debug     启用调试模式（输出到 debug.log）
-  -version   显示版本号
-  -help      显示帮助
+命令:
+  setup           一键部署
+  scan            扫描 IIS 站点
+  deploy          部署证书
+  status          显示状态
+  diagnose        诊断信息收集
+  upgrade         升级工具
+  uninstall       卸载工具
+  version         显示版本
+  help            显示帮助
 
-GUI 模式:
-  直接运行 sslctlw.exe 进入图形界面
+无参数运行进入 GUI 模式。
 
-自动部署模式:
-  sslctlw.exe -auto
+一键部署:
+  sslctlw setup --url <url> --token <token>
+  sslctlw setup --url <url> --token <token> --order <id>
+  sslctlw setup --url <url> --token <token> --order "123,456"
 
-  自动部署模式会读取配置文件，检查所有启用的站点：
-  - 如果证书在配置的天数内过期，自动从部署接口获取新证书并部署
-  - 部署结果记录到日志文件
+扫描:
+  sslctlw scan
+  sslctlw scan --ssl-only
 
-  可配合 Windows 任务计划程序定时执行
+部署:
+  sslctlw deploy --all
+  sslctlw deploy --cert <order_id>
 
-配置目录:
-  程序同目录下的 sslctlw 文件夹
-  - 配置文件: sslctlw/config.json
-  - 日志目录: sslctlw/logs/
+诊断:
+  sslctlw diagnose
+  sslctlw diagnose > diag.txt
 
-创建计划任务:
-  schtasks /create /tn "SSLCtlW" /tr "C:\path\to\sslctlw.exe -auto" /sc daily /st 03:00 /ru SYSTEM
+升级:
+  sslctlw upgrade
+  sslctlw upgrade --check
+
+卸载:
+  sslctlw uninstall
+  sslctlw uninstall --purge
 
 `, version)
 }

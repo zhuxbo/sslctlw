@@ -3,7 +3,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -18,10 +17,10 @@ const (
 	// DataDirName 数据目录名称
 	DataDirName = "sslctlw"
 
-	// DefaultRenewDaysLocal 本地私钥模式：到期前多少天发起续签
+	// DefaultRenewDaysLocal 本机提交：到期前多少天发起续签
 	DefaultRenewDaysLocal = 15
 
-	// DefaultRenewDaysFetch 拉取模式：到期前多少天开始拉取
+	// DefaultRenewDaysFetch 自动签发：到期前多少天开始拉取
 	DefaultRenewDaysFetch = 13
 
 	// DefaultCheckInterval 默认检测间隔（小时）
@@ -41,28 +40,52 @@ type BindRule struct {
 	SiteName string `json:"site_name"` // IIS 站点名称（可选，空则自动匹配）
 }
 
+// CertAPIConfig 证书级 API 配置
+type CertAPIConfig struct {
+	URL            string `json:"url"`                       // 部署接口地址
+	EncryptedToken string `json:"encrypted_token,omitempty"` // DPAPI 加密后的 Token
+}
+
+// GetToken 获取解密后的 Token
+func (c *CertAPIConfig) GetToken() string {
+	if c.EncryptedToken != "" {
+		if decrypted, err := DecryptToken(c.EncryptedToken); err == nil {
+			return decrypted
+		}
+	}
+	return ""
+}
+
+// SetToken 加密并设置 Token
+func (c *CertAPIConfig) SetToken(token string) error {
+	encrypted, err := EncryptToken(token)
+	if err != nil {
+		return fmt.Errorf("Token 加密失败: %w", err)
+	}
+	c.EncryptedToken = encrypted
+	return nil
+}
+
 // CertConfig 证书配置（以证书为维度）
 type CertConfig struct {
-	OrderID          int        `json:"order_id"`                    // 证书订单 ID
-	Domain           string     `json:"domain"`                      // 主域名（显示用）
-	Domains          []string   `json:"domains"`                     // 证书包含的所有域名
-	ExpiresAt        string     `json:"expires_at"`                  // 过期时间
-	SerialNumber     string     `json:"serial_number"`               // 证书序列号
-	Enabled          bool       `json:"enabled"`                     // 是否启用自动部署
-	BindRules        []BindRule `json:"bind_rules,omitempty"`        // 绑定规则
-	UseLocalKey      bool       `json:"use_local_key"`               // 使用本地私钥模式
-	ValidationMethod string     `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
-	AutoBindMode     bool       `json:"auto_bind_mode"`              // 自动绑定模式（按已有绑定更换证书）
+	OrderID          int           `json:"order_id"`                    // 证书订单 ID
+	Domain           string        `json:"domain"`                      // 主域名（显示用）
+	Domains          []string      `json:"domains"`                     // 证书包含的所有域名
+	ExpiresAt        string        `json:"expires_at"`                  // 过期时间
+	SerialNumber     string        `json:"serial_number"`               // 证书序列号
+	Enabled          bool          `json:"enabled"`                     // 是否启用自动部署
+	BindRules        []BindRule    `json:"bind_rules,omitempty"`        // 绑定规则
+	UseLocalKey      bool          `json:"use_local_key"`               // 使用本机提交模式
+	ValidationMethod string        `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
+	AutoBindMode     bool          `json:"auto_bind_mode"`              // 自动绑定模式（按已有绑定更换证书）
+	API              CertAPIConfig `json:"api"`                         // 证书级 API 配置
 }
 
 // Config 应用配置
 type Config struct {
-	APIBaseURL       string       `json:"api_base_url"`
-	Token            string       `json:"token,omitempty"`           // 明文 Token（已禁用，仅用于检测）
-	EncryptedToken   string       `json:"encrypted_token,omitempty"` // 加密后的 Token
 	Certificates     []CertConfig `json:"certificates"`              // 证书配置
-	RenewDaysLocal   int          `json:"renew_days_local"`          // 本地私钥模式：到期前多少天发起续签（默认15）
-	RenewDaysFetch   int          `json:"renew_days_fetch"`          // 拉取模式：到期前多少天开始拉取（默认13）
+	RenewDaysLocal   int          `json:"renew_days_local"`          // 本机提交：到期前多少天发起续签（默认15）
+	RenewDaysFetch   int          `json:"renew_days_fetch"`          // 自动签发：到期前多少天开始拉取（默认13）
 	LastCheck        string       `json:"last_check"`                // 上次检查时间
 	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
 	CheckInterval    int          `json:"check_interval"`            // 检测间隔（小时），默认6
@@ -78,33 +101,9 @@ type Config struct {
 	ReleaseURL       string `json:"release_url"`         // Release API 地址
 }
 
-// GetToken 获取解密后的 Token
-func (c *Config) GetToken() string {
-	if c.EncryptedToken != "" {
-		if decrypted, err := DecryptToken(c.EncryptedToken); err == nil {
-			return decrypted
-		}
-	}
-	return "" // 不回退到明文 Token
-}
-
-// SetToken 加密并设置 Token
-func (c *Config) SetToken(token string) error {
-	encrypted, err := EncryptToken(token)
-	if err != nil {
-		// 加密失败，返回错误而不是回退到明文存储
-		return fmt.Errorf("Token 加密失败: %w", err)
-	}
-	c.EncryptedToken = encrypted
-	c.Token = "" // 清除明文
-	return nil
-}
-
 // DefaultConfig 默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		APIBaseURL:       "",
-		Token:            "",
 		Certificates:     []CertConfig{},
 		RenewDaysLocal:   DefaultRenewDaysLocal,
 		RenewDaysFetch:   DefaultRenewDaysFetch,
@@ -204,11 +203,6 @@ func Load() (*Config, error) {
 	}
 	if cfg.UpgradeChannel == "" {
 		cfg.UpgradeChannel = "stable"
-	}
-
-	if cfg.Token != "" {
-		cfg.Token = "" // 明文 Token 已禁用，清理掉
-		log.Println("警告: 检测到明文 Token，已被禁用，请在界面重新配置")
 	}
 
 	return &cfg, nil

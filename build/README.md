@@ -4,33 +4,68 @@
 
 | 脚本 | 用途 |
 |------|------|
-| `build.ps1` | Windows 构建脚本（PowerShell） |
-| `release.sh` | 发布到远程服务器（Git Bash） |
-| `release-common.sh` | 发布公共函数库 |
+| `build.sh` | 构建脚本（测试 → 编译 → 输出到 dist/） |
+| `sign.sh` | Authenticode 代码签名（SimplySign + signtool） |
+| `release.sh` | 一键发布（构建 → 签名 → 上传） |
+| `install.ps1` | 客户端安装脚本（发布时自动上传到服务器） |
 
-## 构建
+## 一键发布
 
-```powershell
-# 开发构建
-.\build\build.ps1
-
-# 发布构建
-.\build\build.ps1 -Version 1.0.0
+```bash
+./build/release.sh 1.0.0              # 构建 → 签名 → 发布
+./build/release.sh --skip-build 1.0.0 # 跳过构建
+./build/release.sh --skip-sign 1.0.0  # 跳过签名
+./build/release.sh --server cn 1.0.0  # 只发布到指定服务器
+./build/release.sh 1.0.0-beta         # 发布到 dev 通道
 ```
 
-构建输出到 `dist/sslctlw.exe`。
+## 单独使用
 
-## 两步发布流程
-
-```
-1. .\build\build.ps1 -Version 1.0.0              # 本地构建
-2. 云端 EV 签名 dist/sslctlw.exe                  # 人工签名
-3. ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe  # 发布
+```bash
+./build/build.sh 1.0.0    # 仅构建
+./build/sign.sh            # 仅签名 dist/sslctlw.exe
+./build/sign.sh --verify   # 验证签名
 ```
 
-## 远程发布
+## 配置
 
-### 服务器配置
+### build.conf
+
+构建和签名配置，从模板创建：
+
+```bash
+cp build/build.conf.example build/build.conf
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `TRUSTED_ORG` | EV 证书组织名（编译时注入，用于升级验证） |
+| `TRUSTED_COUNTRY` | 国家代码（默认 CN） |
+| `SIGN_THUMBPRINT` | 证书 SHA1 指纹（SimplySign Desktop 查看） |
+| `SIGN_TSA` | 时间戳服务器（默认 `http://time.certum.pl`） |
+
+### release.conf
+
+发布服务器配置：
+
+```bash
+cp build/release.conf.example build/release.conf
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| `SERVERS` | 服务器列表（名称,主机,端口,目录,URL） |
+| `SSH_USER` | SSH 用户名 |
+| `SSH_KEY` | SSH 私钥路径 |
+
+## 发布通道
+
+- `main`: 正式版（如 `1.0.0`）
+- `dev`: 开发版（如 `1.0.0-beta`、`1.0.0-rc1`）
+
+版本号包含 `-` 时自动归入 dev 通道。
+
+## 服务器配置
 
 1. **添加 release 用户**
 ```bash
@@ -59,33 +94,3 @@ chown -R release:release /var/www/release/sslctlw
 apt install python3  # Debian/Ubuntu
 yum install python3  # CentOS/RHEL
 ```
-
-### 本地配置
-
-1. 复制配置文件
-```bash
-cp build/release.conf.example build/release.conf
-chmod 600 build/release.conf
-```
-
-2. 编辑 `build/release.conf`，配置服务器列表和 SSH 密钥
-
-### 发布命令
-
-```bash
-# 测试连接
-./build/release.sh --test
-
-# 发布指定版本
-./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe
-
-# 只发布到指定服务器
-./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe --server cn
-```
-
-### 发布通道
-
-- `main`: 正式版（如 `1.0.0`）
-- `dev`: 开发版（如 `1.0.0-beta`、`1.0.0-rc1`）
-
-版本号包含 `-beta`/`-rc`/`-alpha`/`-dev` 时自动归入 dev 通道。

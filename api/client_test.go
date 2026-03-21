@@ -49,12 +49,12 @@ func TestIsAllowedAPIURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := isAllowedAPIURL(tt.baseURL)
+			allowed, reason := IsAllowedAPIURL(tt.baseURL)
 			if allowed != tt.wantAllow {
-				t.Errorf("isAllowedAPIURL(%q) = %v, want %v (reason: %s)", tt.baseURL, allowed, tt.wantAllow, reason)
+				t.Errorf("IsAllowedAPIURL(%q) = %v, want %v (reason: %s)", tt.baseURL, allowed, tt.wantAllow, reason)
 			}
 			if !allowed && reason == "" {
-				t.Errorf("isAllowedAPIURL(%q) 返回禁止时必须给出原因", tt.baseURL)
+				t.Errorf("IsAllowedAPIURL(%q) 返回禁止时必须给出原因", tt.baseURL)
 			}
 		})
 	}
@@ -216,8 +216,8 @@ func TestSelectBestCert(t *testing.T) {
 		{
 			"优先 active 状态",
 			[]CertData{
-				{OrderID: 1, Domain: "example.com", Status: "pending", ExpiresAt: "2025-01-01"},
-				{OrderID: 2, Domain: "example.com", Status: "active", ExpiresAt: "2024-06-01"},
+				{OrderID: 1, Domains: "example.com", Status: "pending", ExpiresAt: "2025-01-01"},
+				{OrderID: 2, Domains: "example.com", Status: "active", ExpiresAt: "2024-06-01"},
 			},
 			"example.com",
 			2,
@@ -225,8 +225,8 @@ func TestSelectBestCert(t *testing.T) {
 		{
 			"优先精确匹配",
 			[]CertData{
-				{OrderID: 1, Domain: "*.example.com", Status: "active", ExpiresAt: "2025-01-01"},
-				{OrderID: 2, Domain: "www.example.com", Status: "active", ExpiresAt: "2024-06-01"},
+				{OrderID: 1, Domains: "*.example.com", Status: "active", ExpiresAt: "2025-01-01"},
+				{OrderID: 2, Domains: "www.example.com", Status: "active", ExpiresAt: "2024-06-01"},
 			},
 			"www.example.com",
 			2,
@@ -234,8 +234,8 @@ func TestSelectBestCert(t *testing.T) {
 		{
 			"优先过期时间晚",
 			[]CertData{
-				{OrderID: 1, Domain: "example.com", Status: "active", ExpiresAt: "2024-06-01"},
-				{OrderID: 2, Domain: "example.com", Status: "active", ExpiresAt: "2025-01-01"},
+				{OrderID: 1, Domains: "example.com", Status: "active", ExpiresAt: "2024-06-01"},
+				{OrderID: 2, Domains: "example.com", Status: "active", ExpiresAt: "2025-01-01"},
 			},
 			"example.com",
 			2,
@@ -243,7 +243,7 @@ func TestSelectBestCert(t *testing.T) {
 		{
 			"无 active 返回 nil",
 			[]CertData{
-				{OrderID: 1, Domain: "example.com", Status: "pending", ExpiresAt: "2025-01-01"},
+				{OrderID: 1, Domains: "example.com", Status: "pending", ExpiresAt: "2025-01-01"},
 			},
 			"example.com",
 			0,
@@ -278,7 +278,7 @@ func TestParseAPIResponse(t *testing.T) {
 	}{
 		{
 			"有效响应",
-			`{"code":1,"msg":"success","data":[]}`,
+			`{"code":1,"msg":"success","data":{"data":[],"currentPage":1,"pageSize":20,"total":0}}`,
 			200,
 			false,
 			1,
@@ -308,13 +308,13 @@ func TestParseAPIResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseAPIResponse([]byte(tt.body), tt.statusCode)
+			got, err := parseResponse([]byte(tt.body), tt.statusCode)
 			if (err != nil) != tt.wantErr {
-				t.Errorf("parseAPIResponse() error = %v, wantErr %v", err, tt.wantErr)
+				t.Errorf("parseResponse() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
 			if !tt.wantErr && got.Code != tt.wantCode {
-				t.Errorf("parseAPIResponse().Code = %d, want %d", got.Code, tt.wantCode)
+				t.Errorf("parseResponse().Code = %d, want %d", got.Code, tt.wantCode)
 			}
 		})
 	}
@@ -361,15 +361,20 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 1,
 			"msg":  "success",
-			"data": []map[string]interface{}{
-				{
-					"order_id":    123,
-					"domain":      "example.com",
-					"status":      "active",
-					"expires_at":  "2025-01-01",
-					"certificate": "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
-					"private_key": "-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----",
+			"data": map[string]interface{}{
+				"data": []map[string]interface{}{
+					{
+						"order_id":    123,
+						"domains":     "example.com",
+						"status":      "active",
+						"expires_at":  "2025-01-01",
+						"certificate": "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+						"private_key": "-----BEGIN TEST KEY-----\ntest\n-----END TEST KEY-----",
+					},
 				},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
 			},
 		})
 	}))
@@ -400,19 +405,24 @@ func TestListCertsByDomain_MockServer(t *testing.T) {
 
 func TestGetCertByOrderID_MockServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		orderID := r.URL.Query().Get("order_id")
-		if orderID == "123" {
+		order := r.URL.Query().Get("order")
+		if order == "123" {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"code": 1,
 				"msg":  "success",
-				"data": []map[string]interface{}{
-					{
-						"order_id":   123,
-						"domain":     "example.com",
-						"status":     "active",
-						"expires_at": "2025-01-01",
+				"data": map[string]interface{}{
+					"data": []map[string]interface{}{
+						{
+							"order_id":   123,
+							"domains":    "example.com",
+							"status":     "active",
+							"expires_at": "2025-01-01",
+						},
 					},
+					"currentPage": 1,
+					"pageSize":    20,
+					"total":       1,
 				},
 			})
 		} else {
@@ -420,7 +430,12 @@ func TestGetCertByOrderID_MockServer(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"code": 1,
 				"msg":  "success",
-				"data": []map[string]interface{}{},
+				"data": map[string]interface{}{
+					"data":        []map[string]interface{}{},
+					"currentPage": 1,
+					"pageSize":    20,
+					"total":       0,
+				},
 			})
 		}
 	}))
@@ -465,10 +480,8 @@ func TestCallback_MockServer(t *testing.T) {
 
 	err := client.Callback(context.Background(), &CallbackRequest{
 		OrderID:    123,
-		Domain:     "example.com",
 		Status:     "success",
 		DeployedAt: "2024-01-01 00:00:00",
-		ServerType: "IIS",
 	})
 
 	if err != nil {
@@ -493,7 +506,12 @@ func TestDoWithRetry_Success(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 1,
 			"msg":  "success",
-			"data": []interface{}{},
+			"data": map[string]interface{}{
+				"data":        []interface{}{},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       0,
+			},
 		})
 	}))
 	defer server.Close()
@@ -522,7 +540,12 @@ func TestDoWithRetry_5xxRetry(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 1,
 			"msg":  "success",
-			"data": []interface{}{},
+			"data": map[string]interface{}{
+				"data":        []interface{}{},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       0,
+			},
 		})
 	}))
 	defer server.Close()
@@ -545,11 +568,11 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 			t.Errorf("Method = %s, want POST", r.Method)
 		}
 
-		var req CSRRequest
+		var req UpdateRequest
 		json.NewDecoder(r.Body).Decode(&req)
 
-		if req.Domain != "example.com" {
-			t.Errorf("Domain = %s, want example.com", req.Domain)
+		if req.Domains != "example.com" {
+			t.Errorf("Domains = %s, want example.com", req.Domains)
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -565,9 +588,9 @@ func TestSubmitCSR_MockServer(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	resp, err := client.SubmitCSR(context.Background(), &CSRRequest{
-		Domain: "example.com",
-		CSR:    "-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
+	resp, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		Domains: "example.com",
+		CSR:     "-----BEGIN CERTIFICATE REQUEST-----\ntest\n-----END CERTIFICATE REQUEST-----",
 	})
 
 	if err != nil {
@@ -593,9 +616,9 @@ func TestSubmitCSR_APIError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient(server.URL, "test-token")
-	_, err := client.SubmitCSR(context.Background(), &CSRRequest{
-		Domain: "invalid",
-		CSR:    "test",
+	_, err := client.SubmitCSR(context.Background(), &UpdateRequest{
+		Domains: "invalid",
+		CSR:     "test",
 	})
 
 	if err == nil {
@@ -610,25 +633,30 @@ func TestGetCertByDomain_MockServer(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 1,
 			"msg":  "success",
-			"data": []map[string]interface{}{
-				{
-					"order_id":   100,
-					"domain":     "example.com",
-					"status":     "pending",
-					"expires_at": "2025-06-01",
+			"data": map[string]interface{}{
+				"data": []map[string]interface{}{
+					{
+						"order_id":   100,
+						"domains":    "example.com",
+						"status":     "pending",
+						"expires_at": "2025-06-01",
+					},
+					{
+						"order_id":   200,
+						"domains":    "example.com",
+						"status":     "active",
+						"expires_at": "2025-01-01",
+					},
+					{
+						"order_id":   300,
+						"domains":    "example.com",
+						"status":     "active",
+						"expires_at": "2025-12-01",
+					},
 				},
-				{
-					"order_id":   200,
-					"domain":     "example.com",
-					"status":     "active",
-					"expires_at": "2025-01-01",
-				},
-				{
-					"order_id":   300,
-					"domain":     "example.com",
-					"status":     "active",
-					"expires_at": "2025-12-01",
-				},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       3,
 			},
 		})
 	}))
@@ -653,13 +681,18 @@ func TestGetCertByDomain_NoActiveCert(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 1,
 			"msg":  "success",
-			"data": []map[string]interface{}{
-				{
-					"order_id":   100,
-					"domain":     "example.com",
-					"status":     "pending",
-					"expires_at": "2025-06-01",
+			"data": map[string]interface{}{
+				"data": []map[string]interface{}{
+					{
+						"order_id":   100,
+						"domains":    "example.com",
+						"status":     "pending",
+						"expires_at": "2025-06-01",
+					},
 				},
+				"currentPage": 1,
+				"pageSize":    20,
+				"total":       1,
 			},
 		})
 	}))
@@ -715,7 +748,6 @@ func TestListCertsByDomain_CodeNotOne(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"code": 0,
 			"msg":  "Token 无效",
-			"data": []interface{}{},
 		})
 	}))
 	defer server.Close()
@@ -732,14 +764,13 @@ func TestListCertsByDomain_CodeNotOne(t *testing.T) {
 func TestCertData_Fields(t *testing.T) {
 	cert := &CertData{
 		OrderID:     123,
-		Domain:      "example.com",
 		Domains:     "example.com,www.example.com",
 		Status:      "active",
 		Certificate: "-----BEGIN CERTIFICATE-----",
 		PrivateKey:  "-----BEGIN TEST KEY-----",
 		CACert:      "-----BEGIN CERTIFICATE-----",
 		ExpiresAt:   "2025-12-31",
-		CreatedAt:   "2024-01-01",
+		IssuedAt:    "2024-01-01",
 		File: &FileValidation{
 			Path:    "/.well-known/acme-challenge/token",
 			Content: "token-content",
@@ -749,8 +780,8 @@ func TestCertData_Fields(t *testing.T) {
 	if cert.OrderID != 123 {
 		t.Errorf("OrderID = %d", cert.OrderID)
 	}
-	if cert.Domain != "example.com" {
-		t.Errorf("Domain = %q", cert.Domain)
+	if cert.Domain() != "example.com" {
+		t.Errorf("Domain() = %q", cert.Domain())
 	}
 	if cert.Status != "active" {
 		t.Errorf("Status = %q", cert.Status)
@@ -762,11 +793,11 @@ func TestCertData_Fields(t *testing.T) {
 	}
 }
 
-// TestCSRRequest_Fields 测试 CSRRequest 所有字段
-func TestCSRRequest_Fields(t *testing.T) {
-	req := &CSRRequest{
+// TestUpdateRequest_Fields 测试 UpdateRequest 所有字段
+func TestUpdateRequest_Fields(t *testing.T) {
+	req := &UpdateRequest{
 		OrderID:          123,
-		Domain:           "example.com",
+		Domains:          "example.com",
 		CSR:              "-----BEGIN CERTIFICATE REQUEST-----",
 		ValidationMethod: "file",
 	}
@@ -774,8 +805,8 @@ func TestCSRRequest_Fields(t *testing.T) {
 	if req.OrderID != 123 {
 		t.Errorf("OrderID = %d", req.OrderID)
 	}
-	if req.Domain != "example.com" {
-		t.Errorf("Domain = %q", req.Domain)
+	if req.Domains != "example.com" {
+		t.Errorf("Domains = %q", req.Domains)
 	}
 	if req.CSR != "-----BEGIN CERTIFICATE REQUEST-----" {
 		t.Errorf("CSR = %q", req.CSR)
@@ -789,30 +820,18 @@ func TestCSRRequest_Fields(t *testing.T) {
 func TestCallbackRequest_Fields(t *testing.T) {
 	req := &CallbackRequest{
 		OrderID:    123,
-		Domain:     "example.com",
 		Status:     "success",
 		DeployedAt: "2024-01-01 00:00:00",
-		ServerType: "IIS",
-		Message:    "部署成功",
 	}
 
 	if req.OrderID != 123 {
 		t.Errorf("OrderID = %d", req.OrderID)
-	}
-	if req.Domain != "example.com" {
-		t.Errorf("Domain = %q", req.Domain)
 	}
 	if req.Status != "success" {
 		t.Errorf("Status = %q", req.Status)
 	}
 	if req.DeployedAt != "2024-01-01 00:00:00" {
 		t.Errorf("DeployedAt = %q", req.DeployedAt)
-	}
-	if req.ServerType != "IIS" {
-		t.Errorf("ServerType = %q", req.ServerType)
-	}
-	if req.Message != "部署成功" {
-		t.Errorf("Message = %q", req.Message)
 	}
 }
 
@@ -857,8 +876,8 @@ func TestGetCertByOrderID_Validation(t *testing.T) {
 // TestSelectBestCert_ExactMatch 测试精确匹配优先
 func TestSelectBestCert_ExactMatch(t *testing.T) {
 	certs := []CertData{
-		{OrderID: 100, Domain: "*.example.com", Status: "active", ExpiresAt: "2026-01-01"},
-		{OrderID: 200, Domain: "www.example.com", Status: "active", ExpiresAt: "2025-01-01"},
+		{OrderID: 100, Domains: "*.example.com", Status: "active", ExpiresAt: "2026-01-01"},
+		{OrderID: 200, Domains: "www.example.com", Status: "active", ExpiresAt: "2025-01-01"},
 	}
 
 	best := selectBestCert(certs, "www.example.com")
@@ -874,7 +893,7 @@ func TestSelectBestCert_ExactMatch(t *testing.T) {
 // TestSelectBestCert_DomainsField 测试 Domains 字段匹配
 func TestSelectBestCert_DomainsField(t *testing.T) {
 	certs := []CertData{
-		{OrderID: 100, Domain: "example.com", Domains: "example.com,www.example.com,api.example.com", Status: "active", ExpiresAt: "2025-01-01"},
+		{OrderID: 100, Domains: "example.com,www.example.com,api.example.com", Status: "active", ExpiresAt: "2025-01-01"},
 	}
 
 	best := selectBestCert(certs, "api.example.com")
@@ -931,7 +950,7 @@ func TestDoWithRetry_GetBodyError(t *testing.T) {
 
 func TestSelectBestCert_CaseInsensitive(t *testing.T) {
 	certs := []CertData{
-		{OrderID: 100, Domain: "*.Example.COM", Status: "active", ExpiresAt: "2025-01-01"},
+		{OrderID: 100, Domains: "*.Example.COM", Status: "active", ExpiresAt: "2025-01-01"},
 	}
 
 	// util.MatchDomain normalizes to lowercase, so "www.example.com" should match "*.Example.COM"

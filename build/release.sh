@@ -1,12 +1,14 @@
 #!/bin/bash
 
-# sslctlw 远程发布脚本
-# 将已签名的 EXE 部署到远程 release 服务器
+# sslctlw 一键发布脚本
+# 构建 → Authenticode 签名 → 上传到远程服务器
 #
 # 用法:
-#   ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe
-#   ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe --server cn
-#   ./build/release.sh --test
+#   ./release.sh <版本号>              # 一键：构建+签名+发布
+#   ./release.sh --skip-build 1.0.0   # 跳过构建（已有 dist/sslctlw.exe）
+#   ./release.sh --skip-sign 1.0.0    # 跳过 Authenticode 签名
+#   ./release.sh --server cn 1.0.0    # 发布到指定服务器
+#   ./release.sh --test               # 测试 SSH 连接
 
 set -e
 
@@ -16,15 +18,24 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$SCRIPT_DIR/release.conf"
+DIST_DIR="$PROJECT_ROOT/dist"
 
-# 默认配置
+EXE_NAME="sslctlw.exe"
+
 KEEP_VERSIONS=5
 SSH_TIMEOUT=10
 
-# ========================================
-# 加载公共函数库
-# ========================================
-source "$SCRIPT_DIR/release-common.sh"
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1"; }
+log_step()    { echo -e "\n${GREEN}==>${NC} $1"; }
 
 # ========================================
 # 加载配置
@@ -39,204 +50,203 @@ load_config() {
 
     source "$CONFIG_FILE"
 
-    # 验证必要配置
-    if [ ${#SERVERS[@]} -eq 0 ]; then
-        log_error "未配置服务器列表 SERVERS"
-        exit 1
-    fi
+    if [ ${#SERVERS[@]} -eq 0 ]; then log_error "未配置 SERVERS"; exit 1; fi
+    if [ -z "$SSH_USER" ]; then log_error "未配置 SSH_USER"; exit 1; fi
+    if [ -z "$SSH_KEY" ]; then log_error "未配置 SSH_KEY"; exit 1; fi
 
-    if [ -z "$SSH_USER" ]; then
-        log_error "未配置 SSH_USER"
-        exit 1
-    fi
-
-    if [ -z "$SSH_KEY" ]; then
-        log_error "未配置 SSH_KEY"
-        exit 1
-    fi
-
-    # 展开 SSH_KEY 路径中的 ~
     SSH_KEY="${SSH_KEY/#\~/$HOME}"
-
-    if [ ! -f "$SSH_KEY" ]; then
-        log_error "SSH 密钥文件不存在: $SSH_KEY"
-        exit 1
-    fi
+    if [ ! -f "$SSH_KEY" ]; then log_error "SSH 密钥不存在: $SSH_KEY"; exit 1; fi
 }
 
 # ========================================
-# 解析服务器配置
-# 格式: "名称,主机,端口,目录,URL"
+# SSH/SCP
 # ========================================
 parse_server() {
-    local server_str="$1"
-    IFS=',' read -r SERVER_NAME SERVER_HOST SERVER_PORT SERVER_DIR SERVER_URL <<< "$server_str"
+    IFS=',' read -r SERVER_NAME SERVER_HOST SERVER_PORT SERVER_DIR SERVER_URL <<< "$1"
     SERVER_PORT=${SERVER_PORT:-22}
 }
 
-# ========================================
-# SSH 命令封装
-# ========================================
 ssh_cmd() {
-    local host="$1"
-    local port="$2"
-    shift 2
+    local host="$1" port="$2"; shift 2
     ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=$SSH_TIMEOUT \
         -p "$port" "$SSH_USER@$host" "$@"
 }
 
 scp_cmd() {
-    local src="$1"
-    local host="$2"
-    local port="$3"
-    local dest="$4"
-    scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -P "$port" \
-        "$src" "$SSH_USER@$host:$dest"
+    scp -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -P "$3" \
+        "$1" "$SSH_USER@$2:$4"
 }
 
 # ========================================
-# 验证 EXE 签名
+# 测试连接
 # ========================================
-verify_exe_signature() {
-    local exe_path="$1"
-
-    log_step "验证 EXE 签名..."
-
-    if [ ! -f "$exe_path" ]; then
-        log_error "文件不存在: $exe_path"
-        return 1
-    fi
-
-    # 使用 PowerShell 验证 Authenticode 签名
-    local sig_status
-    sig_status=$(powershell.exe -Command "
-        \$sig = Get-AuthenticodeSignature '$exe_path'
-        Write-Output \$sig.Status
-    " 2>/dev/null | tr -d '\r')
-
-    if [ "$sig_status" != "Valid" ]; then
-        log_error "EXE 签名无效: $sig_status"
-        log_info "请先对 EXE 进行 EV 代码签名"
-        return 1
-    fi
-
-    # 显示签名信息
-    powershell.exe -Command "
-        \$sig = Get-AuthenticodeSignature '$exe_path'
-        \$cert = \$sig.SignerCertificate
-        Write-Output \"  Subject: \$(\$cert.Subject)\"
-        Write-Output \"  Issuer:  \$(\$cert.Issuer)\"
-        Write-Output \"  Expires: \$(\$cert.NotAfter)\"
-    " 2>/dev/null | while IFS= read -r line; do
-        log_info "$(echo "$line" | tr -d '\r')"
-    done
-
-    log_success "签名验证通过"
-    return 0
-}
-
-# ========================================
-# 测试 SSH 连接
-# ========================================
-test_ssh_connection() {
-    local server_str="$1"
-    parse_server "$server_str"
-
-    log_info "测试连接: $SERVER_NAME ($SERVER_HOST:$SERVER_PORT)"
-
-    if ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "echo 'SSH OK'" 2>/dev/null; then
-        log_success "$SERVER_NAME: 连接成功"
-        return 0
-    else
-        log_error "$SERVER_NAME: 连接失败"
-        return 1
-    fi
-}
-
 test_all_connections() {
     log_step "测试所有服务器连接..."
     local failed=0
-
     for server in "${SERVERS[@]}"; do
-        if ! test_ssh_connection "$server"; then
+        parse_server "$server"
+        log_info "测试: $SERVER_NAME ($SERVER_HOST:$SERVER_PORT)"
+        if ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "echo 'OK'" 2>/dev/null; then
+            log_success "$SERVER_NAME: 连接成功"
+        else
+            log_error "$SERVER_NAME: 连接失败"
             failed=$((failed + 1))
         fi
     done
+    [ $failed -gt 0 ] && { log_error "$failed 个连接失败"; return 1; }
+    log_success "所有连接正常"
+}
 
-    if [ $failed -gt 0 ]; then
-        log_error "$failed 个服务器连接失败"
-        return 1
+get_channel() {
+    [[ "$1" == *"-"* ]] && echo "dev" || echo "main"
+}
+
+# ========================================
+# 确保 tag
+# ========================================
+ensure_tag() {
+    local tag="$1" head=$(git rev-parse HEAD)
+    local tag_commit=$(git rev-parse "refs/tags/$tag" 2>/dev/null || echo "")
+    if [ -z "$tag_commit" ]; then
+        log_info "创建 tag: $tag"
+        git tag "$tag" && git push origin "$tag"
+    elif [ "$tag_commit" != "$head" ]; then
+        log_warning "更新 tag $tag"
+        git tag -d "$tag"; git push origin ":refs/tags/$tag" 2>/dev/null || true
+        git tag "$tag" && git push origin "$tag"
+    else
+        log_info "tag $tag 已存在"
     fi
+}
 
-    log_success "所有服务器连接正常"
-    return 0
+# ========================================
+# 远程更新 releases.json
+# ========================================
+update_releases_json_remote() {
+    local server_str="$1" version="$2" channel="$3"
+    parse_server "$server_str"
+    log_info "更新 releases.json..."
+
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "RELEASES_FILE='$SERVER_DIR/releases.json' VERSION='$version' CHANNEL='$channel' python3 << 'PYEOF'
+import json, os
+from datetime import datetime
+rf = os.environ['RELEASES_FILE']
+ver = os.environ['VERSION']
+ch = os.environ['CHANNEL']
+v_ver = ver if ver.startswith('v') else f'v{ver}'
+data = {'channels': {}}
+if os.path.exists(rf):
+    try:
+        with open(rf) as f: data = json.load(f)
+    except: pass
+if 'channels' not in data: data['channels'] = {}
+if ch not in data['channels']: data['channels'][ch] = {'versions': []}
+versions = data['channels'][ch]['versions']
+entry = {
+    'version': v_ver, 'date': datetime.now().strftime('%Y-%m-%d'),
+    'path': f'{ch}/{v_ver}',
+    'files': {'windows-amd64': f'{ch}/{v_ver}/sslctlw.exe'}
+}
+strip = lambda s: s[1:] if s.startswith('v') else s
+existing = [i for i, v in enumerate(versions) if strip(v['version']) == strip(v_ver)]
+if existing: versions[existing[0]] = entry
+else: versions.insert(0, entry)
+data['channels'][ch]['latest'] = v_ver
+data['latest_main'] = data['channels'].get('main', {}).get('latest', '')
+data['latest_dev'] = data['channels'].get('dev', {}).get('latest', '')
+with open(rf, 'w') as f: json.dump(data, f, indent=2)
+os.chmod(rf, 0o644)
+print(f'已更新: {ch}/{v_ver}')
+PYEOF"
+}
+
+# ========================================
+# 清理旧版本
+# ========================================
+cleanup_old_versions_remote() {
+    local server_str="$1" channel="$2"
+    parse_server "$server_str"
+    log_info "清理旧版本（保留 $KEEP_VERSIONS 个）..."
+
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "
+        cd \"$SERVER_DIR/$channel\" 2>/dev/null || exit 0
+        removed=\$(ls -dt v* 2>/dev/null | tail -n +$((KEEP_VERSIONS + 1)))
+        [ -n \"\$removed\" ] && echo \"\$removed\" | xargs -r rm -rf
+    "
+
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 << 'PYEOF'
+import json, os
+rf, ch, cd = '$SERVER_DIR/releases.json', '$channel', '$SERVER_DIR/$channel'
+if not os.path.exists(rf): exit(0)
+with open(rf) as f: data = json.load(f)
+if 'channels' not in data or ch not in data['channels']: exit(0)
+existing = {d for d in os.listdir(cd) if d.startswith('v')} if os.path.isdir(cd) else set()
+data['channels'][ch]['versions'] = [v for v in data['channels'][ch].get('versions', []) if v['version'] in existing]
+data['latest_main'] = data['channels'].get('main', {}).get('latest', '')
+data['latest_dev'] = data['channels'].get('dev', {}).get('latest', '')
+with open(rf, 'w') as f: json.dump(data, f, indent=2)
+os.chmod(rf, 0o644)
+PYEOF"
 }
 
 # ========================================
 # 上传到服务器
 # ========================================
 upload_to_server() {
-    local server_str="$1"
-    local version="$2"
-    local channel="$3"
-    local exe_path="$4"
-
+    local server_str="$1" version="$2" channel="$3"
     parse_server "$server_str"
-
     log_step "部署到 $SERVER_NAME ($SERVER_HOST)..."
 
-    local remote_version_dir="$SERVER_DIR/$channel/v$version"
+    local remote_dir="$SERVER_DIR/$channel/$version"
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "mkdir -p \"$remote_dir\" && rm -f \"$remote_dir\"/$EXE_NAME"
 
-    # 创建远程目录
-    log_info "创建目录: $remote_version_dir"
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "mkdir -p $remote_version_dir"
+    log_info "上传 $EXE_NAME..."
+    scp_cmd "$DIST_DIR/$EXE_NAME" "$SERVER_HOST" "$SERVER_PORT" "$remote_dir/"
 
-    # 上传 EXE
-    log_info "上传: sslctlw.exe"
-    scp_cmd "$exe_path" "$SERVER_HOST" "$SERVER_PORT" "$remote_version_dir/sslctlw.exe"
+    # 上传 install.ps1
+    [[ "$SERVER_URL" == *"|"* ]] && { log_error "SERVER_URL 含非法字符"; return 1; }
+    log_info "上传 install.ps1..."
+    local tmp=$(mktemp)
+    sed "s|__RELEASE_URL__|$SERVER_URL|g" "$PROJECT_ROOT/build/install.ps1" > "$tmp"
+    scp_cmd "$tmp" "$SERVER_HOST" "$SERVER_PORT" "$SERVER_DIR/install.ps1"
+    rm -f "$tmp"
 
-    # 更新 releases.json
-    log_info "更新 releases.json..."
-    local releases_file="$SERVER_DIR/releases.json"
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 << 'PYEOF'
-$(generate_releases_update_script "$releases_file" "$version" "$channel" "$remote_version_dir" "$SERVER_URL")
-PYEOF"
+    update_releases_json_remote "$server_str" "$version" "$channel"
 
-    # 清理旧版本
-    log_info "清理旧版本（保留 $KEEP_VERSIONS 个）..."
+    # latest 符号链接
+    local latest_dir="$SERVER_DIR/latest"
+    [ "$channel" = "dev" ] && latest_dir="$SERVER_DIR/dev-latest"
     ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "
-        cd $SERVER_DIR/$channel 2>/dev/null || exit 0
-        ls -dt v* 2>/dev/null | tail -n +$((KEEP_VERSIONS + 1)) | xargs -r rm -rf
+        mkdir -p \"$latest_dir\" && cd \"$latest_dir\"
+        rm -f \"$EXE_NAME\" && ln -s \"../$channel/$version/$EXE_NAME\" \"$EXE_NAME\"
     "
 
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "chmod 644 \"$SERVER_DIR/releases.json\" \"$SERVER_DIR/install.ps1\" 2>/dev/null; chmod 644 \"$remote_dir\"/$EXE_NAME 2>/dev/null"
+
+    cleanup_old_versions_remote "$server_str" "$channel"
     log_success "$SERVER_NAME: 部署完成"
 }
 
 # ========================================
-# 显示帮助
+# 帮助
 # ========================================
 show_help() {
     cat << EOF
-用法: $0 <版本号> --exe-path <路径> [选项]
+sslctlw 一键发布脚本
 
-参数:
-  版本号                 发布版本号（如 1.0.0, 1.1.0-beta）
+用法: $0 [选项] [版本号]
 
 选项:
-  --exe-path PATH       已签名 EXE 的路径（必需）
-  --server NAME         只部署到指定服务器
-  --test                测试所有服务器 SSH 连接
-  -h, --help            显示帮助
+  --skip-build      跳过构建（已有 dist/sslctlw.exe）
+  --skip-sign       跳过 Authenticode 签名
+  --server NAME     只发布到指定服务器
+  --test            测试 SSH 连接
+  -h, --help        显示帮助
 
 示例:
-  $0 1.0.0 --exe-path dist/sslctlw.exe
-  $0 1.1.0-beta --exe-path dist/sslctlw.exe --server cn
-  $0 --test
-
-两步发布流程:
-  1. .\\build\\build.ps1 -Version 1.0.0        # 本地构建
-  2. 云端 EV 签名 dist/sslctlw.exe            # 人工签名
-  3. ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe  # 发布
+  ./release.sh 1.0.0              # 一键：构建 → 签名 → 发布
+  ./release.sh --skip-build 1.0.0 # 跳过构建，签名 + 发布
+  ./release.sh 1.0.0-dev          # 发布到 dev 通道
 EOF
 }
 
@@ -244,125 +254,91 @@ EOF
 # 主流程
 # ========================================
 main() {
-    local version=""
-    local exe_path=""
-    local target_server=""
-    local test_only=false
+    local version="" target_server="" test_only=false
+    local skip_build=false skip_sign=false
 
-    # 解析参数
     while [ $# -gt 0 ]; do
         case "$1" in
-            --test)
-                test_only=true
-                shift
-                ;;
-            --exe-path)
-                exe_path="$2"
-                shift 2
-                ;;
-            --server)
-                target_server="$2"
-                shift 2
-                ;;
-            -h|--help)
-                show_help
-                exit 0
-                ;;
-            -*)
-                log_error "未知选项: $1"
-                show_help
-                exit 1
-                ;;
-            *)
-                version="$1"
-                shift
-                ;;
+            --test) test_only=true; shift ;;
+            --server) target_server="$2"; shift 2 ;;
+            --skip-build) skip_build=true; shift ;;
+            --skip-sign) skip_sign=true; shift ;;
+            -h|--help) show_help; exit 0 ;;
+            -*) log_error "未知选项: $1"; show_help; exit 1 ;;
+            *) version="$1"; shift ;;
         esac
     done
 
-    print_release_banner "sslctlw 远程发布脚本"
+    echo ""
+    echo "========================================"
+    echo "  sslctlw 一键发布"
+    echo "========================================"
+    echo ""
 
-    # 加载配置
     load_config
 
-    # 测试模式
-    if [ "$test_only" = true ]; then
-        test_all_connections
-        exit $?
-    fi
+    if [ "$test_only" = true ]; then test_all_connections; exit $?; fi
 
-    # 验证参数
-    if [ -z "$version" ]; then
-        log_error "请指定版本号"
-        show_help
-        exit 1
-    fi
+    [ -z "$version" ] && { log_error "必须指定版本号"; exit 1; }
 
-    if [ -z "$exe_path" ]; then
-        log_error "请指定 EXE 路径（--exe-path）"
-        show_help
-        exit 1
-    fi
-
-    # 确定通道
     local channel=$(get_channel "$version")
+    local version_bare="${version#v}"
+    [[ "$version" != v* ]] && version="v$version"
 
-    log_info "版本号: $version"
-    log_info "发布通道: $channel"
-    log_info "EXE 路径: $exe_path"
-    log_info "目标服务器: ${target_server:-全部}"
+    log_info "版本: $version"
+    log_info "通道: $channel"
+    log_info "目标: ${target_server:-全部}"
+    echo ""
 
-    # 验证 EXE 签名
-    if ! verify_exe_signature "$exe_path"; then
-        exit 1
+    # ---- 1. 构建 ----
+    if [ "$skip_build" = false ]; then
+        log_step "构建..."
+        "$SCRIPT_DIR/build.sh" "$version_bare"
+        echo ""
+    else
+        log_info "跳过构建"
     fi
 
-    # 测试连接
-    if ! test_all_connections; then
-        log_error "请先解决连接问题"
-        exit 1
+    # ---- 2. Authenticode 签名 ----
+    if [ "$skip_sign" = false ]; then
+        log_step "Authenticode 代码签名..."
+        "$SCRIPT_DIR/sign.sh" "$DIST_DIR/$EXE_NAME"
+        echo ""
+    else
+        log_info "跳过 Authenticode 签名"
     fi
 
-    # 部署到服务器
-    local success=0
-    local failed=0
+    # 检查 exe
+    [ ! -f "$DIST_DIR/$EXE_NAME" ] && { log_error "找不到 $DIST_DIR/$EXE_NAME"; exit 1; }
 
+    # ---- 3. Tag ----
+    [ "$channel" = "main" ] && ensure_tag "v${version#v}"
+
+    # ---- 4. 连接测试 ----
+    test_all_connections || { log_error "请先解决连接问题"; exit 1; }
+
+    # ---- 5. 上传 ----
+    local success=0 failed=0
     for server in "${SERVERS[@]}"; do
         parse_server "$server"
-
-        # 如果指定了服务器，只部署到该服务器
-        if [ -n "$target_server" ] && [ "$SERVER_NAME" != "$target_server" ]; then
-            continue
-        fi
-
-        if upload_to_server "$server" "$version" "$channel" "$exe_path"; then
-            success=$((success + 1))
-        else
-            failed=$((failed + 1))
-            log_error "$SERVER_NAME: 部署失败"
-        fi
+        [ -n "$target_server" ] && [ "$SERVER_NAME" != "$target_server" ] && continue
+        upload_to_server "$server" "$version" "$channel" && success=$((success + 1)) || { failed=$((failed + 1)); log_error "$SERVER_NAME: 失败"; }
     done
 
     echo ""
-    log_step "部署结果汇总"
-    log_info "成功: $success 个服务器"
-    [ $failed -gt 0 ] && log_error "失败: $failed 个服务器"
+    log_step "发布结果"
+    log_info "成功: $success"
+    [ $failed -gt 0 ] && log_error "失败: $failed"
 
     if [ $failed -eq 0 ]; then
-        echo ""
         log_success "发布完成！"
         echo ""
-        log_info "验证命令:"
         for server in "${SERVERS[@]}"; do
             parse_server "$server"
-            if [ -z "$target_server" ] || [ "$SERVER_NAME" = "$target_server" ]; then
-                echo "  curl $SERVER_URL/releases.json | jq ."
-            fi
+            [ -z "$target_server" ] || [ "$SERVER_NAME" = "$target_server" ] && echo "  curl $SERVER_URL/releases.json | jq ."
         done
-    else
-        log_error "部分服务器发布失败"
-        exit 1
     fi
+    return $failed
 }
 
 main "$@"

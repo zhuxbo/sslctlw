@@ -9,11 +9,12 @@
 # - 名称: 服务器标识，用于 --server 参数
 # - 主机: SSH 主机地址
 # - 端口: SSH 端口（默认 22）
-# - 目录: 远程发布目录
-# - URL: 公网访问 URL
+# - 目录: 远程发布目录（与 sslctl 同级，如 /var/www/release/sslctlw）
+# - URL: 公网访问 URL（用于替换 install.ps1 中的 RELEASE_URL）
 
 SERVERS=(
     "cn,release-cn.example.com,22,/var/www/release/sslctlw,https://release-cn.example.com/sslctlw"
+    "us,release-us.example.com,22,/var/www/release/sslctlw,https://release-us.example.com/sslctlw"
 )
 
 # ========================================

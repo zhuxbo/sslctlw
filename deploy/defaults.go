@@ -1,6 +1,8 @@
 package deploy
 
 import (
+	"fmt"
+
 	"sslctlw/api"
 	"sslctlw/cert"
 	"sslctlw/config"
@@ -87,24 +89,27 @@ func (d *defaultOrderStore) DeleteOrder(orderID int) error {
 	return d.store.DeleteOrder(orderID)
 }
 
-// DefaultDeployer 创建默认部署器
+// DefaultDeployer 创建默认部署器（不含 API Client）
 func DefaultDeployer(cfg *config.Config, store *cert.OrderStore) *Deployer {
 	return &Deployer{
 		Converter: &defaultCertConverter{},
 		Installer: &defaultCertInstaller{},
 		Binder:    &defaultIISBinder{iis7Mode: cfg.IIS7Mode},
-		Client:    api.NewClient(cfg.APIBaseURL, cfg.GetToken()),
 		Store:     &defaultOrderStore{store: store},
 	}
 }
 
-// NewDeployerWithClient 使用指定的 API 客户端创建部署器
-func NewDeployerWithClient(cfg *config.Config, store *cert.OrderStore, client APIClient) *Deployer {
-	return &Deployer{
-		Converter: &defaultCertConverter{},
-		Installer: &defaultCertInstaller{},
-		Binder:    &defaultIISBinder{iis7Mode: cfg.IIS7Mode},
-		Client:    client,
-		Store:     &defaultOrderStore{store: store},
+// NewClientForCert 为单个证书创建 API 客户端
+func NewClientForCert(certCfg *config.CertConfig) (*api.Client, error) {
+	apiURL := certCfg.API.URL
+	token := certCfg.API.GetToken()
+
+	if apiURL == "" {
+		return nil, fmt.Errorf("证书 %s (订单 %d) 未配置 API 地址", certCfg.Domain, certCfg.OrderID)
 	}
+	if token == "" {
+		return nil, fmt.Errorf("证书 %s (订单 %d) 未配置 API Token", certCfg.Domain, certCfg.OrderID)
+	}
+
+	return api.NewClient(apiURL, token), nil
 }

@@ -42,8 +42,12 @@ type APIClient interface {
 	GetCertByOrderID(ctx context.Context, orderID int) (*api.CertData, error)
 	// ListCertsByDomain 按域名列出证书
 	ListCertsByDomain(ctx context.Context, domain string) ([]api.CertData, error)
+	// ListCertsByQuery 批量查询证书
+	ListCertsByQuery(ctx context.Context, query string) ([]api.CertData, error)
+	// ListAllCerts 分页查询全部证书
+	ListAllCerts(ctx context.Context) ([]api.CertData, error)
 	// SubmitCSR 提交 CSR
-	SubmitCSR(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error)
+	SubmitCSR(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
 	// Callback 发送部署回调
 	Callback(ctx context.Context, req *api.CallbackRequest) error
 }
@@ -70,12 +74,11 @@ type OrderStore interface {
 	DeleteOrder(orderID int) error
 }
 
-// Deployer 部署器，聚合所有依赖
+// Deployer 部署器，聚合所有依赖（不含 API Client，每个证书独立创建）
 type Deployer struct {
 	Converter  CertConverter
 	Installer  CertInstaller
 	Binder     IISBinder
-	Client     APIClient
 	Store      OrderStore
 	callbackWg sync.WaitGroup
 }

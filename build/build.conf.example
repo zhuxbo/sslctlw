@@ -1,9 +1,8 @@
 # sslctlw 构建配置
 # 复制为 build.conf 并填写实际值
-# 这些值会在编译时注入到二进制中，用于升级时验证 EV 签名
 
 # ========================================
-# EV 证书验证配置
+# EV 证书验证配置（编译时注入，用于升级时验证签名）
 # ========================================
 
 # 可信组织名称（EV 证书的 Organization 字段，精确匹配）
@@ -11,3 +10,13 @@ TRUSTED_ORG="My Company Ltd"
 
 # 可信国家代码（EV 证书的 Country 字段，默认 CN）
 TRUSTED_COUNTRY="CN"
+
+# ========================================
+# Authenticode 代码签名（SimplySign 云端 EV 证书）
+# ========================================
+
+# 证书指纹（SHA1 thumbprint，从 SimplySign Desktop 查看）
+SIGN_THUMBPRINT="your-certificate-thumbprint"
+
+# 时间戳服务器（默认 Certum）
+# SIGN_TSA="http://time.certum.pl"

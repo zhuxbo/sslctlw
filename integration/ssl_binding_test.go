@@ -35,7 +35,7 @@ func TestSSLBinding(t *testing.T) {
 		if certs[i].Status == "active" && certs[i].Certificate != "" && certs[i].PrivateKey != "" {
 			testCert = &certs[i]
 			// 使用证书的主域名作为测试主机名
-			testHostname = certs[i].Domain
+			testHostname = certs[i].Domain()
 			// 通配符域名转换为测试域名
 			if len(testHostname) > 0 && testHostname[0] == '*' {
 				testHostname = "test" + testHostname[1:]
@@ -206,8 +206,8 @@ func TestFindBindingsIgnoresIPBinding(t *testing.T) {
 		if certs[i].Status == "active" &&
 			certs[i].Certificate != "" &&
 			certs[i].PrivateKey != "" &&
-			len(certs[i].Domain) > 0 &&
-			certs[i].Domain[0] == '*' {
+			len(certs[i].Domain()) > 0 &&
+			certs[i].Domain()[0] == '*' {
 			wildcardCert = &certs[i]
 			break
 		}
@@ -245,13 +245,13 @@ func TestFindBindingsIgnoresIPBinding(t *testing.T) {
 	t.Logf("IP 绑定已创建: %s:%d", testIP, testPort)
 
 	// 使用通配符域名查找绑定
-	domains := []string{wildcardCert.Domain}
+	domains := []string{wildcardCert.Domain()}
 	bindings, err := iis.FindBindingsForDomains(domains)
 	if err != nil {
 		t.Fatalf("查找绑定失败: %v", err)
 	}
 
-	t.Logf("通配符域名 %s 查找到 %d 个 SNI 绑定", wildcardCert.Domain, len(bindings))
+	t.Logf("通配符域名 %s 查找到 %d 个 SNI 绑定", wildcardCert.Domain(), len(bindings))
 
 	// 验证 IP 绑定不会被返回（应该被忽略）
 	for key, binding := range bindings {

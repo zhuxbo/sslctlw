@@ -1,6 +1,8 @@
 # sslctlw
 
-IIS SSL 证书部署工具，Go + windigo，单文件 exe。
+IIS SSL 证书部署工具，Go + windigo，单文件 exe（Console 子系统）。
+
+支持 CLI 和 GUI 两种模式：无参数运行打开 GUI，有子命令进入 CLI。
 
 > **维护指引**：保持本文件精简，仅包含项目概览和快速参考。详细规范写入 `skills/` 目录。
 
@@ -9,26 +11,47 @@ IIS SSL 证书部署工具，Go + windigo，单文件 exe。
 - **测试发现 bug 必须修复代码** - 测试的目的是发现 bug 并修复，绝不修改测试去迎合错误的代码
 - **版本号** - 开发构建默认版本为 `dev`，发布构建通过 `-ldflags` 注入版本号
 
+## 命令行
+
+```
+sslctlw <command> [options]
+
+命令: setup / scan / deploy / status / diagnose / upgrade / uninstall / version / help
+无参数: GUI 模式（隐藏控制台窗口）
+--debug: 仅 GUI 模式，写 debug.log
+```
+
 ## 项目结构
 
 ```
+main.go       # 入口：子命令路由 + 无参数开 GUI
+diagnose/     # 诊断信息收集
+setup/        # 一键部署核心逻辑（CLI/GUI 共用）
 ui/           # windigo GUI (mainwindow.go, dialogs.go, background.go)
 iis/          # appcmd + netsh 封装
 cert/         # 证书存储/安装/转换/CSR
 api/          # Deploy API 客户端
-config/       # JSON 配置（DPAPI 加密）
-deploy/       # 自动部署逻辑
+config/       # JSON 配置（DPAPI 加密，API 配置在证书级）
+deploy/       # 自动部署逻辑（per-cert client）
 upgrade/      # 在线升级（签名验证/链式升级）
-util/         # 工具函数
-build/        # 构建/发布脚本
+util/         # 工具函数（含 console_windows.go）
+build/        # 构建/发布/安装脚本
 integration/  # 端到端集成测试
 ```
 
-## 构建
+## 关键设计
 
-```powershell
-.\build\build.ps1 -Version 1.0.0    # 发布构建（输出到 dist/）
-.\build\build.ps1 -Debug             # 开发构建（带控制台）
+- **API 配置在证书级** - 每个 CertConfig 有独立的 `API` 字段（URL + DPAPI 加密 Token），无全局 API
+- **per-cert client** - deploy 层遍历证书时为每个证书创建独立的 API Client
+- **Console 子系统** - 构建为 Console 应用，GUI 模式通过 `util.HideConsole()` 隐藏控制台
+- **setup 共享** - `setup/` 包的 `Run()` 被 CLI 和 GUI 共用，通过 `ProgressFunc` 回调输出进度
+
+## 构建与发布
+
+```bash
+./build/release.sh 1.0.0             # 一键：构建 → 签名 → 发布
+./build/build.sh 1.0.0               # 仅构建
+./build/sign.sh                      # 仅签名 dist/sslctlw.exe
 ```
 
 ## 测试

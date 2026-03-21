@@ -84,21 +84,44 @@ cp build/build.conf.example build/build.conf
 4. **CA 颁发者** — 匹配可信 CA 列表（DigiCert/Sectigo/GlobalSign）
 5. 全部通过 → 直接升级（无需用户确认）
 
-## 两步发布流程
+## 一键发布
 
+```bash
+./build/release.sh 1.0.0              # 构建 → 签名 → 发布
+./build/release.sh --skip-build 1.0.0 # 跳过构建
+./build/release.sh --skip-sign 1.0.0  # 跳过 Authenticode 签名
+./build/release.sh --upload-only 1.0.0 # 仅上传
+./build/release.sh 1.0.0-dev          # 发布到 dev 通道
 ```
-1. .\build\build.ps1 -Version 1.0.0                                   # 本地构建（输出到 dist/）
-2. 云端 EV 签名 dist/sslctlw.exe                                       # 人工签名
-3. ./build/release.sh 1.0.0 --exe-path dist/sslctlw.exe               # 发布到 release 服务器
-```
+
+流程：build.sh 构建 → sign.sh Authenticode 签名 → Ed25519 校验签名 → SSH 上传
 
 ### 发布脚本
 
 | 脚本 | 说明 |
 |------|------|
-| `build/release.sh` | 远程发布脚本（验证签名 → SSH 上传 → 更新 releases.json） |
-| `build/release-common.sh` | 公共函数库（日志、版本、releases.json 生成） |
-| `build/release.conf.example` | 配置模板（服务器列表、SSH 认证） |
+| `build/release.sh` | 一键发布（构建 → 签名 → 上传） |
+| `build/build.sh` | 构建脚本（测试 → 编译 → 输出到 dist/） |
+| `build/sign.sh` | Authenticode 签名（SimplySign + signtool） |
+| `build/release-common.sh` | 公共函数库 |
+
+### 配置
+
+| 文件 | 说明 |
+|------|------|
+| `build/build.conf` | 构建 + 签名配置（TRUSTED_ORG、SIGN_THUMBPRINT 等） |
+| `build/release.conf` | 发布服务器配置（SSH、Ed25519 签名密钥） |
+
+### Authenticode 签名
+
+使用 Certum SimplySign Desktop 云端 EV 证书，build.conf 中配置：
+
+| 配置项 | 说明 |
+|--------|------|
+| `SIGN_THUMBPRINT` | 证书 SHA1 指纹（从 SimplySign Desktop 查看） |
+| `SIGN_TSA` | 时间戳服务器（默认 `http://time.certum.pl`） |
+
+前提：SimplySign Desktop 已连接登录。pinless 卡全自动，pin 卡签名时弹出 PIN 输入。
 
 ### releases.json 格式
 
@@ -126,8 +149,6 @@ cp build/build.conf.example build/build.conf
 
 ## 发布清单
 
-1. 构建：`.\build\build.ps1 -Version X.Y.Z`
-2. EV 代码签名
-3. 发布：`./build/release.sh X.Y.Z --exe-path dist/sslctlw.exe`
-4. 验证：`curl <release-url>/releases.json | jq .`
-5. `git tag vX.Y.Z && git push --tags`
+1. 确认 SimplySign Desktop 已连接
+2. `./build/release.sh X.Y.Z`
+3. 验证：`curl <release-url>/releases.json | jq .`

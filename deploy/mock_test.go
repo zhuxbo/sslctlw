@@ -13,7 +13,9 @@ import (
 type MockAPIClient struct {
 	GetCertByOrderIDFunc  func(ctx context.Context, orderID int) (*api.CertData, error)
 	ListCertsByDomainFunc func(ctx context.Context, domain string) ([]api.CertData, error)
-	SubmitCSRFunc         func(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error)
+	ListCertsByQueryFunc  func(ctx context.Context, query string) ([]api.CertData, error)
+	ListAllCertsFunc      func(ctx context.Context) ([]api.CertData, error)
+	SubmitCSRFunc         func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error)
 	CallbackFunc          func(ctx context.Context, req *api.CallbackRequest) error
 }
 
@@ -31,7 +33,21 @@ func (m *MockAPIClient) ListCertsByDomain(ctx context.Context, domain string) ([
 	return nil, nil
 }
 
-func (m *MockAPIClient) SubmitCSR(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error) {
+func (m *MockAPIClient) ListCertsByQuery(ctx context.Context, query string) ([]api.CertData, error) {
+	if m.ListCertsByQueryFunc != nil {
+		return m.ListCertsByQueryFunc(ctx, query)
+	}
+	return nil, nil
+}
+
+func (m *MockAPIClient) ListAllCerts(ctx context.Context) ([]api.CertData, error) {
+	if m.ListAllCertsFunc != nil {
+		return m.ListAllCertsFunc(ctx)
+	}
+	return nil, nil
+}
+
+func (m *MockAPIClient) SubmitCSR(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
 	if m.SubmitCSRFunc != nil {
 		return m.SubmitCSRFunc(ctx, req)
 	}
@@ -125,7 +141,6 @@ func (m *MockOrderStore) DeleteOrder(orderID int) error {
 func makeTestCertData(orderID int, domain, status, expiresAt string) *api.CertData {
 	return &api.CertData{
 		OrderID:     orderID,
-		Domain:      domain,
 		Domains:     domain,
 		Status:      status,
 		ExpiresAt:   expiresAt,
@@ -250,7 +265,11 @@ func NewMockDeployer() *Deployer {
 		Converter: &MockCertConverter{},
 		Installer: &MockCertInstaller{},
 		Binder:    &MockIISBinder{},
-		Client:    &MockAPIClient{},
 		Store:     &MockOrderStore{},
 	}
+}
+
+// NewMockClient 创建用于测试的 Mock API 客户端
+func NewMockClient() *MockAPIClient {
+	return &MockAPIClient{}
 }

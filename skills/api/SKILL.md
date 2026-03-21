@@ -16,25 +16,29 @@ Authorization: Bearer <deploy-token>
 GET /api/deploy/cert?domain=example.com
 ```
 
-**响应** (证书列表):
+**响应** (分页格式):
 
 ```json
 {
   "code": 1,
   "msg": "success",
-  "data": [
-    {
-      "id": 123,
-      "domain": "example.com",
-      "domains": ["example.com", "www.example.com"],
-      "status": "active",
-      "certificate": "-----BEGIN CERTIFICATE-----...",
-      "private_key": "-----BEGIN PRIVATE KEY-----...",
-      "ca_certificate": "-----BEGIN CERTIFICATE-----...",
-      "expires_at": "2025-12-31",
-      "created_at": "2025-01-01"
-    }
-  ]
+  "data": {
+    "data": [
+      {
+        "order_id": 123,
+        "domains": "example.com,www.example.com",
+        "status": "active",
+        "certificate": "-----BEGIN CERTIFICATE-----...",
+        "private_key": "-----BEGIN PRIVATE KEY-----...",
+        "ca_certificate": "-----BEGIN CERTIFICATE-----...",
+        "expires_at": "2025-12-31",
+        "issued_at": "2025-01-01"
+      }
+    ],
+    "currentPage": 1,
+    "pageSize": 20,
+    "total": 1
+  }
 }
 ```
 
@@ -50,7 +54,7 @@ GET /api/deploy/cert?order_id=123
 
 返回格式同上。
 
-### 提交 CSR（本地私钥模式）
+### 提交 CSR（本机提交模式）
 
 CSR 只需要 CommonName（主域名），不需要 SAN。服务端根据订单配置自动添加 SAN。
 
@@ -85,12 +89,9 @@ POST /api/deploy/callback
 Content-Type: application/json
 
 {
-  "cert_id": 123,
-  "domain": "example.com",
+  "order_id": 123,
   "status": "success",
-  "deployed_at": "2025-01-01 12:00:00",
-  "server_type": "IIS",
-  "message": ""
+  "deployed_at": "2025-01-01 12:00:00"
 }
 ```
 
@@ -150,11 +151,9 @@ cert, err := client.GetCertByOrderID(ctx, orderID)
 
 // 部署回调
 client.Callback(&api.CallbackRequest{
-    CertID:     cert.ID,
-    Domain:     "example.com",
+    OrderID:    cert.OrderID,
     Status:     "success",
     DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
-    ServerType: "IIS",
 })
 ```
 
@@ -184,14 +183,14 @@ client.Callback(&api.CallbackRequest{
 | `domain` | 主域名（common_name） |
 | `domains` | SAN 域名列表 |
 | `order_id` | 订单 ID |
-| `use_local_key` | 本地私钥模式（true）或拉取模式（false） |
-| `renew_days_local` | 本地私钥模式：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
-| `renew_days_fetch` | 拉取模式：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
+| `use_local_key` | 本机提交模式（true）或自动签发模式（false） |
+| `renew_days_local` | 本机提交：到期前多少天发起续签（默认 15，需 > 服务端 14 天） |
+| `renew_days_fetch` | 自动签发：到期前多少天开始拉取（默认 13，需 < 服务端 14 天） |
 | `check_interval` | 定时检测间隔（小时，默认 6） |
 
 ## 部署模式
 
-### 拉取模式（UseLocalKey = false，默认）
+### 自动签发模式（UseLocalKey = false，默认）
 
 ```
 查询 OrderID 对应证书
@@ -203,7 +202,7 @@ client.Callback(&api.CallbackRequest{
 
 **设计意图**：服务端 14 天自动续签，客户端 13 天开始拉取，确保拿到新证书。
 
-### 本地私钥模式（UseLocalKey = true）
+### 本机提交模式（UseLocalKey = true）
 
 ```
 检查 OrderID > 0?

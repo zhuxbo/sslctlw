@@ -261,48 +261,43 @@ func TestConfig_UpdateCertificate(t *testing.T) {
 	}
 }
 
-func TestConfig_GetToken_Empty(t *testing.T) {
-	cfg := &Config{}
-	token := cfg.GetToken()
+func TestCertAPIConfig_GetToken_Empty(t *testing.T) {
+	api := &CertAPIConfig{}
+	token := api.GetToken()
 	if token != "" {
 		t.Errorf("GetToken() = %q, want empty string", token)
 	}
 }
 
-func TestConfig_SetToken(t *testing.T) {
-	cfg := &Config{}
-	err := cfg.SetToken("test-token-12345")
+func TestCertAPIConfig_SetToken(t *testing.T) {
+	api := &CertAPIConfig{}
+	err := api.SetToken("test-token-12345")
 	if err != nil {
 		t.Fatalf("SetToken() error = %v", err)
 	}
 
 	// 验证加密后的 Token 存在
-	if cfg.EncryptedToken == "" {
+	if api.EncryptedToken == "" {
 		t.Error("EncryptedToken 应该不为空")
 	}
 
-	// 验证明文 Token 被清除
-	if cfg.Token != "" {
-		t.Errorf("Token 应该被清除, got %q", cfg.Token)
-	}
-
 	// 验证可以正确解密
-	decrypted := cfg.GetToken()
+	decrypted := api.GetToken()
 	if decrypted != "test-token-12345" {
 		t.Errorf("GetToken() = %q, want %q", decrypted, "test-token-12345")
 	}
 }
 
-func TestConfig_SetToken_Empty(t *testing.T) {
-	cfg := &Config{Token: "old-token"}
-	err := cfg.SetToken("")
+func TestCertAPIConfig_SetToken_Empty(t *testing.T) {
+	api := &CertAPIConfig{}
+	err := api.SetToken("")
 	if err != nil {
 		t.Fatalf("SetToken(\"\") error = %v", err)
 	}
 
 	// 空 token 加密后应该是空字符串
-	if cfg.EncryptedToken != "" {
-		t.Errorf("空 Token 加密后应该为空, got %q", cfg.EncryptedToken)
+	if api.EncryptedToken != "" {
+		t.Errorf("空 Token 加密后应该为空, got %q", api.EncryptedToken)
 	}
 }
 
@@ -471,9 +466,6 @@ func TestLoad_PlainTokenRejected(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("Load() 应该返回配置对象")
 	}
-	if cfg.Token != "" {
-		t.Errorf("Load() 应清理明文 Token, got %q", cfg.Token)
-	}
 }
 
 func containsString(s, substr string) bool {
@@ -540,12 +532,13 @@ func TestLoad_DefaultConfig(t *testing.T) {
 func TestConfig_Save_And_Load(t *testing.T) {
 	// 创建测试配置
 	cfg := DefaultConfig()
-	cfg.APIBaseURL = "https://test.example.com/api"
-	cfg.SetToken("test-token-12345")
+	certAPI := CertAPIConfig{URL: "https://test.example.com/api"}
+	_ = certAPI.SetToken("test-token-12345")
 	cfg.AddCertificate(CertConfig{
 		OrderID: 999,
 		Domain:  "test.example.com",
 		Enabled: true,
+		API:     certAPI,
 	})
 
 	// 保存
@@ -560,17 +553,6 @@ func TestConfig_Save_And_Load(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	// 验证
-	if loaded.APIBaseURL != "https://test.example.com/api" {
-		t.Errorf("APIBaseURL = %q", loaded.APIBaseURL)
-	}
-
-	// Token 应该能正确解密
-	token := loaded.GetToken()
-	if token != "test-token-12345" {
-		t.Errorf("GetToken() = %q, want %q", token, "test-token-12345")
-	}
-
 	// 验证证书配置
 	foundCert := false
 	for _, cert := range loaded.Certificates {
@@ -578,6 +560,13 @@ func TestConfig_Save_And_Load(t *testing.T) {
 			foundCert = true
 			if cert.Domain != "test.example.com" {
 				t.Errorf("cert.Domain = %q", cert.Domain)
+			}
+			if cert.API.URL != "https://test.example.com/api" {
+				t.Errorf("cert.API.URL = %q", cert.API.URL)
+			}
+			token := cert.API.GetToken()
+			if token != "test-token-12345" {
+				t.Errorf("cert.API.GetToken() = %q, want %q", token, "test-token-12345")
 			}
 		}
 	}
@@ -631,9 +620,6 @@ func TestValidateValidationMethod_MoreCases(t *testing.T) {
 // TestConfig_AllFields 测试 Config 所有字段
 func TestConfig_AllFields(t *testing.T) {
 	cfg := &Config{
-		APIBaseURL:       "https://api.example.com",
-		Token:            "plain-token",
-		EncryptedToken:   "encrypted-token",
 		Certificates:     []CertConfig{{OrderID: 1}},
 		RenewDaysLocal:   20,
 		RenewDaysFetch:   10,
@@ -644,15 +630,6 @@ func TestConfig_AllFields(t *testing.T) {
 		IIS7Mode:         true,
 	}
 
-	if cfg.APIBaseURL != "https://api.example.com" {
-		t.Errorf("APIBaseURL = %q", cfg.APIBaseURL)
-	}
-	if cfg.Token != "plain-token" {
-		t.Errorf("Token = %q", cfg.Token)
-	}
-	if cfg.EncryptedToken != "encrypted-token" {
-		t.Errorf("EncryptedToken = %q", cfg.EncryptedToken)
-	}
 	if len(cfg.Certificates) != 1 {
 		t.Errorf("Certificates 长度 = %d", len(cfg.Certificates))
 	}
@@ -719,28 +696,28 @@ func TestGetDefaultBindRules_Domains(t *testing.T) {
 	}
 }
 
-// TestConfig_SetToken_Multiple 测试多次设置 Token
-func TestConfig_SetToken_Multiple(t *testing.T) {
-	cfg := &Config{}
+// TestCertAPIConfig_SetToken_Multiple 测试多次设置 Token
+func TestCertAPIConfig_SetToken_Multiple(t *testing.T) {
+	api := &CertAPIConfig{}
 
 	// 第一次设置
-	err := cfg.SetToken("token1")
+	err := api.SetToken("token1")
 	if err != nil {
 		t.Fatalf("SetToken(token1) error = %v", err)
 	}
 
-	token1 := cfg.GetToken()
+	token1 := api.GetToken()
 	if token1 != "token1" {
 		t.Errorf("GetToken() = %q, want %q", token1, "token1")
 	}
 
 	// 第二次设置（覆盖）
-	err = cfg.SetToken("token2")
+	err = api.SetToken("token2")
 	if err != nil {
 		t.Fatalf("SetToken(token2) error = %v", err)
 	}
 
-	token2 := cfg.GetToken()
+	token2 := api.GetToken()
 	if token2 != "token2" {
 		t.Errorf("GetToken() = %q, want %q", token2, "token2")
 	}

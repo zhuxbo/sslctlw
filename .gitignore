@@ -33,6 +33,10 @@ debug/
 sslctlw/
 config.json
 
+# Build/release config (contains secrets)
+build/build.conf
+build/release.conf
+
 # Temp
 nul
 

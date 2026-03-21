@@ -15,13 +15,19 @@ import (
 	"sslctlw/iis"
 )
 
+// testCertAPI 返回测试用的 CertAPIConfig（使用明文存储，避免 DPAPI 依赖）
+func testCertAPI() config.CertAPIConfig {
+	return config.CertAPIConfig{
+		URL:            "https://api.example.com",
+		EncryptedToken: "", // 测试时直接通过 mock client 绕过
+	}
+}
+
 // TestAutoDeploy_NoCertificates 测试没有配置证书的情况
 func TestAutoDeploy_NoCertificates(t *testing.T) {
 	cfg := &config.Config{
 		Certificates: []config.CertConfig{},
-		APIBaseURL:   "https://api.example.com",
 	}
-	cfg.SetToken("test-token")
 
 	d := NewMockDeployer()
 	results := AutoDeploy(cfg, d)
@@ -31,21 +37,23 @@ func TestAutoDeploy_NoCertificates(t *testing.T) {
 	}
 }
 
-// TestAutoDeploy_NoToken 测试没有配置 Token 的情况
-func TestAutoDeploy_NoToken(t *testing.T) {
+// TestAutoDeploy_NoAPIConfig 测试没有配置 API 的证书返回失败
+func TestAutoDeploy_NoAPIConfig(t *testing.T) {
 	cfg := &config.Config{
 		Certificates: []config.CertConfig{
 			{OrderID: 123, Domain: "example.com", Enabled: true},
 		},
-		APIBaseURL: "https://api.example.com",
 	}
-	// 不设置 Token
 
 	d := NewMockDeployer()
 	results := AutoDeploy(cfg, d)
 
-	if len(results) != 0 {
-		t.Errorf("没有配置 Token 时应该返回空结果，得到 %d 个结果", len(results))
+	// 无 API 配置应该返回失败结果
+	if len(results) != 1 {
+		t.Fatalf("期望 1 个失败结果，得到 %d 个", len(results))
+	}
+	if results[0].Success {
+		t.Error("无 API 配置时应该失败")
 	}
 }
 
@@ -55,9 +63,7 @@ func TestAutoDeploy_DisabledCertificate(t *testing.T) {
 		Certificates: []config.CertConfig{
 			{OrderID: 123, Domain: "example.com", Enabled: false},
 		},
-		APIBaseURL: "https://api.example.com",
 	}
-	cfg.SetToken("test-token")
 
 	d := NewMockDeployer()
 	results := AutoDeploy(cfg, d)
@@ -118,7 +124,7 @@ func TestCheckRenewalNeeded(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			certData := &api.CertData{
-				Domain:    "example.com",
+				Domains:   "example.com",
 				ExpiresAt: tt.expiresAt,
 			}
 
@@ -279,9 +285,6 @@ func TestDeployer_Interface(t *testing.T) {
 	if deployer.Binder == nil {
 		t.Error("Binder 不应为 nil")
 	}
-	if deployer.Client == nil {
-		t.Error("Client 不应为 nil")
-	}
 	if deployer.Store == nil {
 		t.Error("Store 不应为 nil")
 	}
@@ -427,7 +430,7 @@ func TestMockAPIClient(t *testing.T) {
 			GetCertByOrderIDFunc: func(ctx context.Context, orderID int) (*api.CertData, error) {
 				return &api.CertData{
 					OrderID: orderID,
-					Domain:  "example.com",
+					Domains: "example.com",
 					Status:  "active",
 				}, nil
 			},
@@ -444,14 +447,11 @@ func TestMockAPIClient(t *testing.T) {
 
 	t.Run("提交 CSR", func(t *testing.T) {
 		client := &MockAPIClient{
-			SubmitCSRFunc: func(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error) {
-				return &api.CSRResponse{
+			SubmitCSRFunc: func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
+				return &api.UpdateResponse{
 					Code: 1,
 					Msg:  "success",
-					Data: struct {
-						OrderID int    `json:"order_id"`
-						Status  string `json:"status"`
-					}{
+					Data: api.CertData{
 						OrderID: 456,
 						Status:  "processing",
 					},
@@ -459,9 +459,9 @@ func TestMockAPIClient(t *testing.T) {
 			},
 		}
 
-		resp, err := client.SubmitCSR(context.Background(), &api.CSRRequest{
-			Domain: "example.com",
-			CSR:    "test-csr",
+		resp, err := client.SubmitCSR(context.Background(), &api.UpdateRequest{
+			Domains: "example.com",
+			CSR:     "test-csr",
 		})
 		if err != nil {
 			t.Errorf("SubmitCSR() error = %v", err)
@@ -482,7 +482,6 @@ func TestMockAPIClient(t *testing.T) {
 
 		err := client.Callback(context.Background(), &api.CallbackRequest{
 			OrderID: 123,
-			Domain:  "example.com",
 			Status:  "success",
 		})
 		if err != nil {
@@ -595,7 +594,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -634,7 +633,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果（每个 BindRule 域名一个），得到 %d 个", len(results))
@@ -663,7 +662,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -702,7 +701,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
@@ -746,7 +745,7 @@ func TestDeployCertWithRules(t *testing.T) {
 		conflicts := map[string][]int{}
 		allCerts := []config.CertConfig{certCfg}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		if !bindByIPCalled {
 			t.Error("IIS7 模式下应该调用 BindCertificateByIP")
@@ -789,7 +788,7 @@ func TestDeployCertWithRules(t *testing.T) {
 			"shared.com": {0, 1},
 		}
 
-		results := deployCertWithRules(d, certData, testKeyPEM, certCfg, conflicts, allCerts)
+		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
 
 		// shared.com 应该被跳过（certCfg2 的 ExpiresAt 更晚，OrderID=200 优先）
 		// 只有 unique.com 会被处理
@@ -827,7 +826,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -855,7 +854,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
 
 		if len(results) != 0 {
 			t.Errorf("无匹配绑定时期望 0 个结果，得到 %d 个", len(results))
@@ -882,7 +881,7 @@ func TestDeployCertAutoMode(t *testing.T) {
 			AutoBindMode: true,
 		}
 
-		results := deployCertAutoMode(d, certData, testKeyPEM, certCfg)
+		results := deployCertAutoMode(d, NewMockClient(), certData, testKeyPEM, certCfg)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -907,10 +906,11 @@ func TestDeployCertAutoMode(t *testing.T) {
 func TestHandleLocalKeyMode(t *testing.T) {
 	t.Run("processing状态", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Client.(*MockAPIClient).GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
+		mockClient := NewMockClient()
+		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
 				OrderID: 100,
-				Domain:  "example.com",
+				Domains: "example.com",
 				Status:  "processing",
 			}, nil
 		}
@@ -920,7 +920,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 			Domain:  "example.com",
 		}
 
-		certData, privateKey, reason, err := handleLocalKeyMode(d, certCfg, 15)
+		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 15)
 
 		if err != nil {
 			t.Errorf("不期望错误，得到: %v", err)
@@ -938,12 +938,13 @@ func TestHandleLocalKeyMode(t *testing.T) {
 
 	t.Run("active且未到续签时间", func(t *testing.T) {
 		d := NewMockDeployer()
+		mockClient := NewMockClient()
 		// 设置过期时间为未来很远
 		futureExpiry := time.Now().AddDate(0, 6, 0).Format("2006-01-02")
-		d.Client.(*MockAPIClient).GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
+		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
 				OrderID:     100,
-				Domain:      "example.com",
+				Domains:     "example.com",
 				Status:      "active",
 				ExpiresAt:   futureExpiry,
 				Certificate: testCertPEM,
@@ -956,7 +957,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 			Domain:  "example.com",
 		}
 
-		certData, _, reason, err := handleLocalKeyMode(d, certCfg, 15)
+		certData, _, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 15)
 
 		if err != nil {
 			t.Errorf("不期望错误，得到: %v", err)
@@ -971,12 +972,13 @@ func TestHandleLocalKeyMode(t *testing.T) {
 
 	t.Run("active有API私钥且需要续签", func(t *testing.T) {
 		d := NewMockDeployer()
+		mockClient := NewMockClient()
 		// 设置过期时间为很快过期
 		soonExpiry := time.Now().AddDate(0, 0, 5).Format("2006-01-02")
-		d.Client.(*MockAPIClient).GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
+		mockClient.GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
 			return &api.CertData{
 				OrderID:     100,
-				Domain:      "example.com",
+				Domains:     "example.com",
 				Status:      "active",
 				ExpiresAt:   soonExpiry,
 				Certificate: testCertPEM,
@@ -992,7 +994,7 @@ func TestHandleLocalKeyMode(t *testing.T) {
 			Domain:  "example.com",
 		}
 
-		certData, privateKey, reason, err := handleLocalKeyMode(d, certCfg, 100)
+		certData, privateKey, reason, err := handleLocalKeyMode(d, mockClient, certCfg, 100)
 
 		if err != nil {
 			t.Errorf("不期望错误，得到: %v", err)
@@ -1019,14 +1021,12 @@ func TestHandleLocalKeyMode(t *testing.T) {
 func TestSubmitNewCSR(t *testing.T) {
 	t.Run("CSR提交成功-processing", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Client.(*MockAPIClient).SubmitCSRFunc = func(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error) {
-			return &api.CSRResponse{
+		mockClient := NewMockClient()
+		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
+			return &api.UpdateResponse{
 				Code: 1,
 				Msg:  "success",
-				Data: struct {
-					OrderID int    `json:"order_id"`
-					Status  string `json:"status"`
-				}{
+				Data: api.CertData{
 					OrderID: 200,
 					Status:  "processing",
 				},
@@ -1039,7 +1039,7 @@ func TestSubmitNewCSR(t *testing.T) {
 			Domains: []string{"example.com"},
 		}
 
-		certData, _, reason, err := submitNewCSR(d, certCfg)
+		certData, _, reason, err := submitNewCSR(d, mockClient, certCfg)
 
 		if err != nil {
 			t.Errorf("不期望错误，得到: %v", err)
@@ -1058,7 +1058,8 @@ func TestSubmitNewCSR(t *testing.T) {
 
 	t.Run("CSR提交失败", func(t *testing.T) {
 		d := NewMockDeployer()
-		d.Client.(*MockAPIClient).SubmitCSRFunc = func(ctx context.Context, req *api.CSRRequest) (*api.CSRResponse, error) {
+		mockClient := NewMockClient()
+		mockClient.SubmitCSRFunc = func(ctx context.Context, req *api.UpdateRequest) (*api.UpdateResponse, error) {
 			return nil, errors.New("网络错误")
 		}
 
@@ -1068,7 +1069,7 @@ func TestSubmitNewCSR(t *testing.T) {
 			Domains: []string{"example.com"},
 		}
 
-		_, _, _, err := submitNewCSR(d, certCfg)
+		_, _, _, err := submitNewCSR(d, mockClient, certCfg)
 
 		if err == nil {
 			t.Error("期望错误，但成功了")
@@ -1086,18 +1087,19 @@ func TestSubmitNewCSR(t *testing.T) {
 func TestSendCallback(t *testing.T) {
 	t.Run("成功", func(t *testing.T) {
 		d := NewMockDeployer()
+		mockClient := NewMockClient()
 
 		var callCount int32
 		var wg sync.WaitGroup
 		wg.Add(1)
 
-		d.Client.(*MockAPIClient).CallbackFunc = func(ctx context.Context, req *api.CallbackRequest) error {
+		mockClient.CallbackFunc = func(ctx context.Context, req *api.CallbackRequest) error {
 			atomic.AddInt32(&callCount, 1)
 			wg.Done()
 			return nil
 		}
 
-		sendCallback(d, 100, "example.com", true, "")
+		sendCallback(d, mockClient, 100, "example.com", true, "")
 
 		wg.Wait()
 
@@ -1108,15 +1110,16 @@ func TestSendCallback(t *testing.T) {
 
 	t.Run("失败只调用一次-依赖内部重试", func(t *testing.T) {
 		d := NewMockDeployer()
+		mockClient := NewMockClient()
 
 		var callCount int32
 
-		d.Client.(*MockAPIClient).CallbackFunc = func(ctx context.Context, req *api.CallbackRequest) error {
+		mockClient.CallbackFunc = func(ctx context.Context, req *api.CallbackRequest) error {
 			atomic.AddInt32(&callCount, 1)
 			return errors.New("回调失败")
 		}
 
-		sendCallback(d, 100, "example.com", false, "部署失败")
+		sendCallback(d, mockClient, 100, "example.com", false, "部署失败")
 
 		d.callbackWg.Wait()
 
@@ -1128,145 +1131,81 @@ func TestSendCallback(t *testing.T) {
 }
 
 // =============================================================================
-// AutoDeploy 集成测试
+// AutoDeploy 集成测试（per-cert client 模式）
 // =============================================================================
 
-func TestAutoDeploy_Integration(t *testing.T) {
-	t.Run("拉取模式-成功", func(t *testing.T) {
+func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
+	t.Run("无API配置-全部失败", func(t *testing.T) {
 		d := NewMockDeployer()
 
-		// 设置过期时间为快过期（确保触发部署）
-		soonExpiry := time.Now().AddDate(0, 0, 5).Format("2006-01-02")
-
-		d.Client.(*MockAPIClient).GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
-			return &api.CertData{
-				OrderID:     orderID,
-				Domain:      "example.com",
-				Domains:     "example.com",
-				Status:      "active",
-				ExpiresAt:   soonExpiry,
-				Certificate: testCertPEM,
-				PrivateKey:  testKeyPEM,
-				CACert:      testCACertPEM,
-			}, nil
-		}
-
 		cfg := &config.Config{
-			APIBaseURL:     "https://api.example.com",
 			RenewDaysFetch: 13,
 			RenewDaysLocal: 15,
 			Certificates: []config.CertConfig{
 				{
-					OrderID:     100,
-					Domain:      "example.com",
-					Domains:     []string{"example.com"},
-					Enabled:     true,
-					UseLocalKey: false,
+					OrderID: 100,
+					Domain:  "example.com",
+					Domains: []string{"example.com"},
+					Enabled: true,
 					BindRules: []config.BindRule{
 						{Domain: "example.com", Port: 443},
 					},
+					// 无 API 配置
 				},
 			},
 		}
-		cfg.SetToken("test-token")
 
 		results := AutoDeploy(cfg, d)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
 		}
-		if !results[0].Success {
-			t.Errorf("期望成功，得到失败: %s", results[0].Message)
+		if results[0].Success {
+			t.Error("无 API 配置时期望失败")
 		}
-		if results[0].Domain != "example.com" {
-			t.Errorf("期望域名 example.com，得到 %s", results[0].Domain)
-		}
-		if results[0].Thumbprint == "" {
-			t.Error("期望指纹不为空")
+		if !strings.Contains(results[0].Message, "API 配置错误") {
+			t.Errorf("期望消息包含 'API 配置错误'，得到 %s", results[0].Message)
 		}
 	})
 
-	t.Run("多证书-部分失败", func(t *testing.T) {
+	t.Run("混合-部分有API部分无API", func(t *testing.T) {
 		d := NewMockDeployer()
 
-		soonExpiry := time.Now().AddDate(0, 0, 5).Format("2006-01-02")
-
-		d.Client.(*MockAPIClient).GetCertByOrderIDFunc = func(ctx context.Context, orderID int) (*api.CertData, error) {
-			if orderID == 100 {
-				return nil, errors.New("API 错误: 订单不存在")
-			}
-			return &api.CertData{
-				OrderID:     orderID,
-				Domain:      "success.com",
-				Domains:     "success.com",
-				Status:      "active",
-				ExpiresAt:   soonExpiry,
-				Certificate: testCertPEM,
-				PrivateKey:  testKeyPEM,
-				CACert:      testCACertPEM,
-			}, nil
-		}
-
 		cfg := &config.Config{
-			APIBaseURL:     "https://api.example.com",
 			RenewDaysFetch: 13,
 			RenewDaysLocal: 15,
 			Certificates: []config.CertConfig{
 				{
-					OrderID:     100,
-					Domain:      "fail.com",
-					Domains:     []string{"fail.com"},
-					Enabled:     true,
-					UseLocalKey: false,
+					OrderID: 100,
+					Domain:  "no-api.com",
+					Enabled: true,
 					BindRules: []config.BindRule{
-						{Domain: "fail.com", Port: 443},
+						{Domain: "no-api.com", Port: 443},
 					},
+					// 无 API 配置
 				},
 				{
-					OrderID:     200,
-					Domain:      "success.com",
-					Domains:     []string{"success.com"},
-					Enabled:     true,
-					UseLocalKey: false,
+					OrderID: 200,
+					Domain:  "no-token.com",
+					Enabled: true,
 					BindRules: []config.BindRule{
-						{Domain: "success.com", Port: 443},
+						{Domain: "no-token.com", Port: 443},
 					},
+					API: config.CertAPIConfig{URL: "https://api.example.com"},
+					// 无 Token
 				},
 			},
 		}
-		cfg.SetToken("test-token")
 
 		results := AutoDeploy(cfg, d)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))
 		}
-
-		// 验证两个证书独立处理
-		var failResult, successResult *Result
-		for i := range results {
-			if results[i].Domain == "fail.com" {
-				failResult = &results[i]
-			} else if results[i].Domain == "success.com" {
-				successResult = &results[i]
+		for _, r := range results {
+			if r.Success {
+				t.Errorf("域名 %s 期望失败", r.Domain)
 			}
-		}
-
-		if failResult == nil {
-			t.Fatal("未找到 fail.com 的结果")
-		}
-		if failResult.Success {
-			t.Error("fail.com 期望失败")
-		}
-		if !strings.Contains(failResult.Message, "获取证书失败") {
-			t.Errorf("fail.com 期望消息包含 '获取证书失败'，得到 %s", failResult.Message)
-		}
-
-		if successResult == nil {
-			t.Fatal("未找到 success.com 的结果")
-		}
-		if !successResult.Success {
-			t.Errorf("success.com 期望成功，得到失败: %s", successResult.Message)
 		}
 	})
 }

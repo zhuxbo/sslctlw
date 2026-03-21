@@ -26,17 +26,12 @@ type Result struct {
 	OrderID    int
 }
 
-// AutoDeploy 自动部署证书（证书维度）
+// AutoDeploy 自动部署证书（证书维度，per-cert client）
 func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 	results := make([]Result, 0)
 
 	if len(cfg.Certificates) == 0 {
 		log.Println("没有配置任何证书")
-		return results
-	}
-
-	if cfg.GetToken() == "" {
-		log.Println("未配置 API Token")
 		return results
 	}
 
@@ -60,6 +55,19 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 			continue
 		}
 
+		// per-cert client
+		client, clientErr := NewClientForCert(&cfg.Certificates[i])
+		if clientErr != nil {
+			log.Printf("创建证书 %s 的 API 客户端失败: %v", certCfg.Domain, clientErr)
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: fmt.Sprintf("API 配置错误: %v", clientErr),
+				OrderID: certCfg.OrderID,
+			})
+			continue
+		}
+
 		log.Printf("检查证书: %s (订单: %d, 本地私钥: %v)", certCfg.Domain, certCfg.OrderID, certCfg.UseLocalKey)
 
 		var certData *api.CertData
@@ -68,16 +76,16 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		var err error
 
 		if certCfg.UseLocalKey {
-			// 本地私钥模式：到期前 > RenewDaysLocal 天发起续签
+			// 本机提交：到期前 > RenewDaysLocal 天发起续签
 			// 目的：抢在服务端自动续签（14天）之前，由本地发起 CSR
 			var reason string
-			certData, privateKey, reason, err = handleLocalKeyMode(d, &cfg.Certificates[i], cfg.RenewDaysLocal)
+			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.RenewDaysLocal)
 			if err != nil {
-				log.Printf("本地私钥模式处理失败: %v", err)
+				log.Printf("本机提交处理失败: %v", err)
 				results = append(results, Result{
 					Domain:  certCfg.Domain,
 					Success: false,
-					Message: fmt.Sprintf("本地私钥模式失败: %v", err),
+					Message: fmt.Sprintf("本机提交失败: %v", err),
 					OrderID: certCfg.OrderID,
 				})
 				continue
@@ -89,10 +97,10 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 				continue
 			}
 		} else {
-			// 拉取模式：到期前 < RenewDaysFetch 天开始拉取
+			// 自动签发：到期前 < RenewDaysFetch 天开始拉取
 			// 目的：等服务端自动续签（14天）完成后再拉取
 			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-			certData, err = d.Client.GetCertByOrderID(ctx, certCfg.OrderID)
+			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
 			cancel()
 			if err != nil {
 				log.Printf("获取证书失败: %v", err)
@@ -117,33 +125,33 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 				continue
 			}
 
-			// 拉取模式：检查是否到了拉取时间
+			// 自动签发：检查是否到了拉取时间
 			expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 			if err != nil {
-				log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain, certData.OrderID, certData.ExpiresAt, err)
+				log.Printf("解析证书 %s (订单 %d) 过期时间失败（值: %q）: %v", certData.Domain(), certData.OrderID, certData.ExpiresAt, err)
 				continue
 			}
 
 			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
 			if daysUntilExpiry > cfg.RenewDaysFetch {
-				log.Printf("证书 %s 还有 %d 天过期，等待服务端续签（<=%d天后拉取）", certData.Domain, daysUntilExpiry, cfg.RenewDaysFetch)
+				log.Printf("证书 %s 还有 %d 天过期，等待服务端续签（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.RenewDaysFetch)
 				continue
 			}
 
-			log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain, daysUntilExpiry)
+			log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain(), daysUntilExpiry)
 			privateKey = certData.PrivateKey
 		}
 
-		log.Printf("证书 %s 开始部署...", certData.Domain)
+		log.Printf("证书 %s 开始部署...", certData.Domain())
 
 		// 根据模式选择部署方式
 		var deployResults []Result
 		if certCfg.AutoBindMode {
 			// 自动绑定模式：按已有绑定更换证书
-			deployResults = deployCertAutoMode(d, certData, privateKey, certCfg)
+			deployResults = deployCertAutoMode(d, client, certData, privateKey, certCfg)
 		} else {
 			// 规则绑定模式：按配置的绑定规则部署
-			deployResults = deployCertWithRules(d, certData, privateKey, certCfg, conflicts, cfg.Certificates)
+			deployResults = deployCertWithRules(d, client, certData, privateKey, certCfg, conflicts, cfg.Certificates)
 		}
 		results = append(results, deployResults...)
 
@@ -159,14 +167,11 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		log.Printf("警告: 保存配置失败: %v", err)
 	}
 
-	// 等待所有回调完成，避免任务结束过早
-	d.WaitCallbacks()
-
 	return results
 }
 
 // deployCertWithRules 使用绑定规则部署证书
-func deployCertWithRules(d *Deployer, certData *api.CertData, privateKey string, certCfg config.CertConfig, conflicts map[string][]int, allCerts []config.CertConfig) []Result {
+func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig, conflicts map[string][]int, allCerts []config.CertConfig) []Result {
 	results := make([]Result, 0)
 
 	// 转换 PEM 到 PFX
@@ -261,7 +266,7 @@ func deployCertWithRules(d *Deployer, certData *api.CertData, privateKey string,
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(d, certData.OrderID, rule.Domain, false, "绑定失败: "+bindErr.Error())
+			sendCallback(d, client, certData.OrderID, rule.Domain, false, "绑定失败: "+bindErr.Error())
 		} else {
 			log.Printf("绑定成功: %s", rule.Domain)
 			results = append(results, Result{
@@ -271,7 +276,7 @@ func deployCertWithRules(d *Deployer, certData *api.CertData, privateKey string,
 				Thumbprint: thumbprint,
 				OrderID:    certData.OrderID,
 			})
-			sendCallback(d, certData.OrderID, rule.Domain, true, "")
+			sendCallback(d, client, certData.OrderID, rule.Domain, true, "")
 		}
 	}
 
@@ -319,10 +324,10 @@ func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 	}
 	daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
 	if daysUntilExpiry > renewDays {
-		log.Printf("证书 %s 还有 %d 天过期，未到续签时间（>%d天）", certData.Domain, daysUntilExpiry, renewDays)
+		log.Printf("证书 %s 还有 %d 天过期，未到续签时间（>%d天）", certData.Domain(), daysUntilExpiry, renewDays)
 		return false, fmt.Sprintf("未到续签时间（还有 %d 天）", daysUntilExpiry)
 	}
-	log.Printf("证书 %s 还有 %d 天过期，需要续签（<=%d天）", certData.Domain, daysUntilExpiry, renewDays)
+	log.Printf("证书 %s 还有 %d 天过期，需要续签（<=%d天）", certData.Domain(), daysUntilExpiry, renewDays)
 	return true, ""
 }
 
@@ -356,23 +361,23 @@ func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.Cert
 }
 
 // submitNewCSR 生成并提交新的 CSR
-func submitNewCSR(d *Deployer, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
+func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
 	log.Printf("生成新的 CSR")
 	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
 	}
 
-	csrReq := &api.CSRRequest{
+	csrReq := &api.UpdateRequest{
 		OrderID:          certCfg.OrderID,
-		Domain:           certCfg.Domain,
+		Domains:          certCfg.Domain,
 		CSR:              csrPEM,
 		ValidationMethod: certCfg.ValidationMethod,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), api.APISubmitTimeout)
 	defer cancel()
-	csrResp, err := d.Client.SubmitCSR(ctx, csrReq)
+	csrResp, err := client.SubmitCSR(ctx, csrReq)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("提交 CSR 失败: %w", err)
 	}
@@ -387,7 +392,7 @@ func submitNewCSR(d *Deployer, certCfg *config.CertConfig) (*api.CertData, strin
 
 	if csrResp.Data.Status == "active" {
 		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err := d.Client.GetCertByOrderID(queryCtx, newOrderID)
+		certData, err := client.GetCertByOrderID(queryCtx, newOrderID)
 		queryCancel()
 		if err == nil && certData.Status == "active" {
 			if err := d.Store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
@@ -401,11 +406,11 @@ func submitNewCSR(d *Deployer, certCfg *config.CertConfig) (*api.CertData, strin
 	return nil, "", "CSR 已提交，等待签发", nil
 }
 
-// handleLocalKeyMode 处理本地私钥模式
+// handleLocalKeyMode 处理本机提交模式
 // renewDays: 到期前多少天发起续签（默认15天，需大于服务端自动续签的14天）
 // 返回: 证书数据, 私钥, 跳过原因, 错误
 // 当返回 certData=nil 且 error=nil 时，reason 说明跳过原因
-func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) (*api.CertData, string, string, error) {
+func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfig, renewDays int) (*api.CertData, string, string, error) {
 	// 1. 校验配置
 	if err := validateCertConfig(certCfg); err != nil {
 		return nil, "", "", err
@@ -414,7 +419,7 @@ func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) 
 	// 2. 检查现有订单
 	if certCfg.OrderID > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
-		certData, err := d.Client.GetCertByOrderID(ctx, certCfg.OrderID)
+		certData, err := client.GetCertByOrderID(ctx, certCfg.OrderID)
 		cancel()
 		if err != nil {
 			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
@@ -442,11 +447,15 @@ func handleLocalKeyMode(d *Deployer, certCfg *config.CertConfig, renewDays int) 
 				log.Printf("使用 API 返回的私钥")
 				return certData, certData.PrivateKey, "", nil
 			}
+		} else {
+			// 非预期状态（pending/unpaid/cancelled 等），不提交新 CSR 防止重复下单
+			log.Printf("订单 %d 状态为 %q，跳过", certCfg.OrderID, certData.Status)
+			return nil, "", fmt.Sprintf("订单状态: %s", certData.Status), nil
 		}
 	}
 
 	// 3. 提交新的 CSR
-	return submitNewCSR(d, certCfg)
+	return submitNewCSR(d, client, certCfg)
 }
 
 // checkDomainConflicts 检查域名冲突（同一域名配置在多个证书中）
@@ -531,11 +540,11 @@ func parseCertExpiry(value string) (time.Time, bool) {
 func updateOrderMeta(orderID int, certData *api.CertData, store OrderStore) {
 	meta := &cert.OrderMeta{
 		OrderID:      orderID,
-		Domain:       certData.Domain,
+		Domain:       certData.Domain(),
 		Domains:      certData.GetDomainList(),
 		Status:       certData.Status,
 		ExpiresAt:    certData.ExpiresAt,
-		CreatedAt:    certData.CreatedAt,
+		CreatedAt:    certData.IssuedAt,
 		LastDeployed: time.Now().Format("2006-01-02 15:04:05"),
 	}
 	if err := store.SaveMeta(orderID, meta); err != nil {
@@ -548,7 +557,7 @@ const CallbackTimeout = 60 * time.Second
 
 // sendCallback 发送部署回调（异步，带超时控制）
 // 注意：Client.Callback 内部已有重试机制（doWithRetry），此处不再额外重试
-func sendCallback(d *Deployer, orderID int, domain string, success bool, message string) {
+func sendCallback(d *Deployer, client APIClient, orderID int, domain string, success bool, message string) {
 	d.callbackWg.Add(1)
 	go func() {
 		defer d.callbackWg.Done()
@@ -562,14 +571,11 @@ func sendCallback(d *Deployer, orderID int, domain string, success bool, message
 
 		req := &api.CallbackRequest{
 			OrderID:    orderID,
-			Domain:     domain,
 			Status:     status,
 			DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
-			ServerType: "IIS",
-			Message:    message,
 		}
 
-		if err := d.Client.Callback(ctx, req); err != nil {
+		if err := client.Callback(ctx, req); err != nil {
 			log.Printf("回调失败 (%s): %v", domain, err)
 		}
 	}()
@@ -583,7 +589,7 @@ func CheckAndDeploy() error {
 	}
 
 	if len(cfg.Certificates) == 0 {
-		return fmt.Errorf("没有配置任何证书，请先运行 GUI 模式添加配置")
+		return fmt.Errorf("没有配置任何证书，请先运行 sslctlw setup 或 GUI 添加配置")
 	}
 
 	store := cert.NewOrderStore()
@@ -616,7 +622,7 @@ func CheckAndDeploy() error {
 
 // deployCertAutoMode 自动绑定模式部署
 // 查找 IIS 中已有的 SSL 绑定，更换证书
-func deployCertAutoMode(d *Deployer, certData *api.CertData, privateKey string, certCfg config.CertConfig) []Result {
+func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, privateKey string, certCfg config.CertConfig) []Result {
 	results := make([]Result, 0)
 
 	// 1. 转换并安装证书
@@ -676,11 +682,11 @@ func deployCertAutoMode(d *Deployer, certData *api.CertData, privateKey string, 
 		if bindErr != nil {
 			log.Printf("绑定失败: %v", bindErr)
 			results = append(results, Result{Domain: domain, Success: false, Message: bindErr.Error(), Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(d, certData.OrderID, domain, false, bindErr.Error())
+			sendCallback(d, client, certData.OrderID, domain, false, bindErr.Error())
 		} else {
 			log.Printf("绑定成功: %s", domain)
 			results = append(results, Result{Domain: domain, Success: true, Message: "部署成功", Thumbprint: thumbprint, OrderID: certData.OrderID})
-			sendCallback(d, certData.OrderID, domain, true, "")
+			sendCallback(d, client, certData.OrderID, domain, true, "")
 		}
 	}
 
