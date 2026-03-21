@@ -17,9 +17,9 @@ func TestCreateTask_InvalidName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := CreateTask(tt.taskName, 1)
+			err := CreateTask(tt.taskName)
 			if err == nil {
-				t.Errorf("CreateTask(%q, 1) 应该返回错误", tt.taskName)
+				t.Errorf("CreateTask(%q) 应该返回错误", tt.taskName)
 			}
 		})
 	}

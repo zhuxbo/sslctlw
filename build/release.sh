@@ -112,7 +112,7 @@ ensure_tag() {
         git tag "$tag" && git push origin "$tag"
     elif [ "$tag_commit" != "$head" ]; then
         log_warning "更新 tag $tag"
-        git tag -d "$tag"; git push origin ":refs/tags/$tag" 2>/dev/null || true
+        git tag -d "$tag" 2>/dev/null || true; git push origin ":refs/tags/$tag" 2>/dev/null || true
         git tag "$tag" && git push origin "$tag"
     else
         log_info "tag $tag 已存在"

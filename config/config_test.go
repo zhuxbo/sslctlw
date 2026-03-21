@@ -56,16 +56,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Fatal("DefaultConfig() returned nil")
 	}
 
-	if cfg.RenewDaysLocal != 15 {
-		t.Errorf("RenewDaysLocal = %d, want 15", cfg.RenewDaysLocal)
-	}
-
-	if cfg.RenewDaysFetch != 13 {
-		t.Errorf("RenewDaysFetch = %d, want 13", cfg.RenewDaysFetch)
-	}
-
-	if cfg.CheckInterval != 6 {
-		t.Errorf("CheckInterval = %d, want 6", cfg.CheckInterval)
+	if cfg.RenewDays != 13 {
+		t.Errorf("RenewDays = %d, want 13", cfg.RenewDays)
 	}
 
 	if cfg.TaskName != "SSLCtlW" {
@@ -520,11 +512,8 @@ func TestLoad_DefaultConfig(t *testing.T) {
 	}
 
 	// 验证默认值
-	if cfg.RenewDaysLocal == 0 {
-		t.Error("RenewDaysLocal 应该有默认值")
-	}
-	if cfg.RenewDaysFetch == 0 {
-		t.Error("RenewDaysFetch 应该有默认值")
+	if cfg.RenewDays == 0 {
+		t.Error("RenewDays 应该有默认值")
 	}
 }
 
@@ -621,11 +610,9 @@ func TestValidateValidationMethod_MoreCases(t *testing.T) {
 func TestConfig_AllFields(t *testing.T) {
 	cfg := &Config{
 		Certificates:     []CertConfig{{OrderID: 1}},
-		RenewDaysLocal:   20,
-		RenewDaysFetch:   10,
+		RenewDays:        20,
 		LastCheck:        "2024-01-01 00:00:00",
 		AutoCheckEnabled: true,
-		CheckInterval:    12,
 		TaskName:         "CustomTask",
 		IIS7Mode:         true,
 	}
@@ -633,20 +620,14 @@ func TestConfig_AllFields(t *testing.T) {
 	if len(cfg.Certificates) != 1 {
 		t.Errorf("Certificates 长度 = %d", len(cfg.Certificates))
 	}
-	if cfg.RenewDaysLocal != 20 {
-		t.Errorf("RenewDaysLocal = %d", cfg.RenewDaysLocal)
-	}
-	if cfg.RenewDaysFetch != 10 {
-		t.Errorf("RenewDaysFetch = %d", cfg.RenewDaysFetch)
+	if cfg.RenewDays != 20 {
+		t.Errorf("RenewDays = %d", cfg.RenewDays)
 	}
 	if cfg.LastCheck != "2024-01-01 00:00:00" {
 		t.Errorf("LastCheck = %q", cfg.LastCheck)
 	}
 	if !cfg.AutoCheckEnabled {
 		t.Error("AutoCheckEnabled 应该为 true")
-	}
-	if cfg.CheckInterval != 12 {
-		t.Errorf("CheckInterval = %d", cfg.CheckInterval)
 	}
 	if cfg.TaskName != "CustomTask" {
 		t.Errorf("TaskName = %q", cfg.TaskName)

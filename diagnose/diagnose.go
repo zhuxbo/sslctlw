@@ -89,7 +89,7 @@ func collectProgramInfo(version string) *config.Config {
 	printKV("证书数量", fmt.Sprintf("%d (启用 %d, 禁用 %d)", len(cfg.Certificates), enabled, disabled))
 
 	if cfg.AutoCheckEnabled {
-		printKV("自动部署", fmt.Sprintf("已启用 (间隔 %d 小时)", cfg.CheckInterval))
+		printKV("自动部署", "已启用 (每天一次)")
 	} else {
 		printKV("自动部署", "未启用")
 	}
