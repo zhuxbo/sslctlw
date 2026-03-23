@@ -228,7 +228,7 @@ func (t *BackgroundTask) doCheck() {
 	t.updateStatus(TaskStatusRunning, fmt.Sprintf("正在检查 %d 个证书...", len(cfg.Certificates)))
 
 	store := cert.NewOrderStore()
-	results := deploy.AutoDeploy(cfg, deploy.DefaultDeployer(cfg, store))
+	results := deploy.AutoDeploy(cfg, deploy.DefaultDeployer(cfg, store), false)
 
 	t.mu.Lock()
 	t.lastRun = time.Now()

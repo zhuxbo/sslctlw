@@ -43,6 +43,9 @@ integration/  # 端到端集成测试
 
 - **API 配置在证书级** - 每个 CertConfig 有独立的 `API` 字段（URL + DPAPI 加密 Token），无全局 API
 - **per-cert client** - deploy 层遍历证书时为每个证书创建独立的 API Client
+- **分散延迟** - CLI `deploy --all` 启用分散延迟（总上限 600s），GUI 不延迟
+- **域名提取** - 部署成功后从证书 PEM 提取 CN+SAN 更新配置，回退到 API 数据
+- **Local 模式健壮性** - CSR 重试上限 10 次、processing 超时 24h、7 天自动重置
 - **Console 子系统** - 构建为 Console 应用，GUI 模式通过 `util.HideConsole()` 隐藏控制台
 - **setup 共享** - `setup/` 包的 `Run()` 被 CLI 和 GUI 共用，通过 `ProgressFunc` 回调输出进度
 
