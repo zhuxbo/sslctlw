@@ -29,7 +29,7 @@ diagnose/     # 诊断信息收集
 setup/        # 一键部署核心逻辑（CLI/GUI 共用）
 ui/           # windigo GUI (mainwindow.go, dialogs.go, background.go)
 iis/          # appcmd + netsh 封装
-cert/         # 证书存储/安装/转换/CSR
+cert/         # 证书存储/安装/转换/CSR/证书链检查与修复
 api/          # Deploy API 客户端
 config/       # JSON 配置（DPAPI 加密，API 配置在证书级）
 deploy/       # 自动部署逻辑（per-cert client）
