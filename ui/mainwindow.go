@@ -18,6 +18,7 @@ import (
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"
+	"github.com/rodrigocfd/windigo/win"
 )
 
 // 调试模式
@@ -403,6 +404,13 @@ func RunApp() {
 	})
 
 	app.btnBind.On().BnClicked(func() {
+		app.withPausedTaskUpdate(func() {
+			app.onBindCert()
+		})
+	})
+
+	// 双击站点列表打开绑定窗口
+	app.siteList.On().NmDblClk(func(_ *win.NMITEMACTIVATE) {
 		app.withPausedTaskUpdate(func() {
 			app.onBindCert()
 		})

@@ -421,11 +421,11 @@ func ShowCertStoreDialog(owner ui.Parent, onSuccess func()) {
 				}
 
 				if result.FixedCount == 0 && result.FailedCount == 0 {
-					ui.MsgOk(dlg, "提示", "无需修复", "所有证书的中级证书链都是完整的。")
+					ui.MsgOk(dlg, "提示", "无需修复", "所有证书的证书链都是完整的。")
 				} else if result.FailedCount > 0 {
-					ui.MsgWarn(dlg, "补齐中级证书", "部分完成", summary)
+					ui.MsgWarn(dlg, "修复证书链", "部分完成", summary)
 				} else {
-					ui.MsgOk(dlg, "成功", "补齐完成", summary)
+					ui.MsgOk(dlg, "成功", "修复完成", summary)
 				}
 				loadDataAsync()
 			})
