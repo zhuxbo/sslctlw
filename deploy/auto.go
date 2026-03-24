@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +18,21 @@ import (
 	"sslctlw/util"
 )
 
+// 分散延迟常量
+const (
+	spreadMin      = 5   // 最小延迟（秒）
+	spreadMax      = 120 // 最大延迟（秒）
+	spreadTotalMax = 600 // 总延迟上限（秒）
+)
+
+// Local 模式健壮性常量
+const (
+	maxIssueRetries   = 10                    // CSR 最大重试次数
+	retryResetDays    = 7                     // 重试计数重置间隔（天）
+	processingTimeout = 24 * time.Hour        // processing 状态超时时间
+	timeFormat        = "2006-01-02 15:04:05" // 时间格式
+)
+
 // Result 部署结果
 type Result struct {
 	Domain     string
@@ -27,7 +43,8 @@ type Result struct {
 }
 
 // AutoDeploy 自动部署证书（证书维度，per-cert client）
-func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
+// scatterDelay: 是否在证书间插入分散延迟（CLI deploy --all 启用，GUI 不启用）
+func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 	results := make([]Result, 0)
 
 	if len(cfg.Certificates) == 0 {
@@ -49,11 +66,32 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		}
 	}
 
+	// 统计启用证书数量，计算分散延迟
+	var sleepMin, sleepMax int
+	if scatterDelay {
+		enabledCount := 0
+		for _, c := range cfg.Certificates {
+			if c.Enabled {
+				enabledCount++
+			}
+		}
+		sleepMin, sleepMax = calcSpreadDelay(enabledCount)
+	}
+	processedIndex := 0
+
 	// 遍历证书配置
 	for i, certCfg := range cfg.Certificates {
 		if !certCfg.Enabled {
 			continue
 		}
+
+		// 分散延迟：第一个证书不延迟
+		if scatterDelay && processedIndex > 0 && sleepMin > 0 {
+			delay := sleepMin + rand.IntN(sleepMax-sleepMin+1)
+			log.Printf("分散延迟 %d 秒...", delay)
+			time.Sleep(time.Duration(delay) * time.Second)
+		}
+		processedIndex++
 
 		// per-cert client
 		client, clientErr := NewClientForCert(&cfg.Certificates[i])
@@ -156,6 +194,11 @@ func AutoDeploy(cfg *config.Config, d *Deployer) []Result {
 		// 更新配置中的订单 ID
 		if certCfg.UseLocalKey && certCfg.OrderID != certData.OrderID {
 			cfg.Certificates[i].OrderID = certData.OrderID
+		}
+
+		// 部署成功后，从证书 PEM 提取域名更新配置
+		if hasSuccessResult(deployResults) && certData.Certificate != "" {
+			updateCertDomains(&cfg.Certificates[i], certData.Certificate)
 		}
 	}
 
@@ -298,7 +341,19 @@ func validateCertConfig(certCfg *config.CertConfig) error {
 }
 
 // handleProcessingOrder 处理 processing 状态的订单
-func handleProcessingOrder(certCfg *config.CertConfig, certData *api.CertData) (string, error) {
+// 返回: timedOut（是否超时需要重新提交 CSR）, reason, error
+func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *api.CertData) (timedOut bool, reason string, err error) {
+	// 检查 processing 超时
+	meta, _ := d.Store.LoadMeta(certCfg.OrderID)
+	if meta != nil && meta.CSRSubmittedAt != "" {
+		submittedAt, parseErr := time.Parse(timeFormat, meta.CSRSubmittedAt)
+		if parseErr == nil && time.Since(submittedAt) > processingTimeout {
+			log.Printf("订单 %d CSR 已提交超过 %v 仍在 processing，清除状态准备重新提交", certCfg.OrderID, processingTimeout)
+			d.Store.DeleteOrder(certCfg.OrderID)
+			return true, "", nil
+		}
+	}
+
 	if certData.File != nil && certData.File.Path != "" {
 		log.Printf("订单 %d 需要文件验证", certCfg.OrderID)
 		if err := handleFileValidation(certCfg.Domain, certData.File); err != nil {
@@ -309,7 +364,7 @@ func handleProcessingOrder(certCfg *config.CertConfig, certData *api.CertData) (
 	} else {
 		log.Printf("订单 %d 处理中，等待签发", certCfg.OrderID)
 	}
-	return "CSR 已提交，等待签发", nil
+	return false, "CSR 已提交，等待签发", nil
 }
 
 // checkRenewalNeeded 检查证书是否需要续签
@@ -360,7 +415,30 @@ func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.Cert
 
 // submitNewCSR 生成并提交新的 CSR
 func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
-	log.Printf("生成新的 CSR")
+	// 检查重试计数
+	retryCount := 0
+	meta, _ := d.Store.LoadMeta(certCfg.OrderID)
+	if meta != nil {
+		retryCount = meta.IssueRetryCount
+		if retryCount >= maxIssueRetries {
+			// 检查是否超过重置间隔
+			if meta.CSRSubmittedAt == "" {
+				// 元数据不完整，保守处理：重置计数
+				log.Printf("CSR 重试计数 %d 但提交时间缺失，重置计数", retryCount)
+				retryCount = 0
+			} else {
+				submittedAt, err := time.Parse(timeFormat, meta.CSRSubmittedAt)
+				if err == nil && time.Since(submittedAt) > time.Duration(retryResetDays)*24*time.Hour {
+					log.Printf("CSR 重试计数已达 %d 次，但距上次提交超过 %d 天，重置计数", retryCount, retryResetDays)
+					retryCount = 0
+				} else {
+					return nil, "", "", fmt.Errorf("CSR 重试次数已达上限 (%d)，将在 %d 天后自动重置", maxIssueRetries, retryResetDays)
+				}
+			}
+		}
+	}
+
+	log.Printf("生成新的 CSR (重试: %d/%d)", retryCount, maxIssueRetries)
 	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
@@ -387,6 +465,19 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*a
 
 	certCfg.OrderID = newOrderID
 	log.Printf("CSR 已提交，订单 ID: %d，状态: %s", newOrderID, csrResp.Data.Status)
+
+	// 记录重试计数和提交时间
+	csrMeta := &cert.OrderMeta{
+		OrderID:         newOrderID,
+		Domain:          certCfg.Domain,
+		Status:          csrResp.Data.Status,
+		CSRSubmittedAt:  time.Now().Format(timeFormat),
+		IssueRetryCount: retryCount + 1,
+		LastIssueState:  csrResp.Data.Status,
+	}
+	if err := d.Store.SaveMeta(newOrderID, csrMeta); err != nil {
+		log.Printf("警告: 保存 CSR 元数据失败: %v", err)
+	}
 
 	if csrResp.Data.Status == "active" {
 		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
@@ -423,8 +514,14 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
 			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
 		} else if certData.Status == "processing" {
-			reason, _ := handleProcessingOrder(certCfg, certData)
-			return nil, "", reason, nil
+			timedOut, reason, handleErr := handleProcessingOrder(d, certCfg, certData)
+			if handleErr != nil {
+				return nil, "", "", handleErr
+			}
+			if !timedOut {
+				return nil, "", reason, nil
+			}
+			// 超时，fall through 到提交新 CSR
 		} else if certData.Status == "active" {
 			// 证书已签发，清理之前可能残留的验证文件
 			cleanupValidationFiles(certCfg.Domain)
@@ -537,17 +634,61 @@ func parseCertExpiry(value string) (time.Time, bool) {
 
 func updateOrderMeta(orderID int, certData *api.CertData, store OrderStore) {
 	meta := &cert.OrderMeta{
-		OrderID:      orderID,
-		Domain:       certData.Domain(),
-		Domains:      certData.GetDomainList(),
-		Status:       certData.Status,
-		ExpiresAt:    certData.ExpiresAt,
-		CreatedAt:    certData.IssuedAt,
-		LastDeployed: time.Now().Format("2006-01-02 15:04:05"),
+		OrderID:         orderID,
+		Domain:          certData.Domain(),
+		Domains:         certData.GetDomainList(),
+		Status:          certData.Status,
+		ExpiresAt:       certData.ExpiresAt,
+		CreatedAt:       certData.IssuedAt,
+		LastDeployed:    time.Now().Format(timeFormat),
+		IssueRetryCount: 0,  // 签发成功，重置重试计数
+		LastIssueState:  "",
+		CSRSubmittedAt:  "",
 	}
 	if err := store.SaveMeta(orderID, meta); err != nil {
 		log.Printf("保存订单元数据失败: %v", err)
 	}
+}
+
+// calcSpreadDelay 根据证书数量计算分散延迟区间（秒）
+func calcSpreadDelay(count int) (sMin, sMax int) {
+	if count <= 1 {
+		return 0, 0
+	}
+	gaps := count - 1
+	sMax = spreadTotalMax / gaps
+	if sMax > spreadMax {
+		sMax = spreadMax
+	}
+	if sMax < spreadMin {
+		sMax = spreadMin
+	}
+	sMin = sMax / 4
+	if sMin < spreadMin {
+		sMin = spreadMin
+	}
+	return sMin, sMax
+}
+
+// hasSuccessResult 检查部署结果中是否有成功项
+func hasSuccessResult(results []Result) bool {
+	for _, r := range results {
+		if r.Success {
+			return true
+		}
+	}
+	return false
+}
+
+// updateCertDomains 从证书 PEM 提取域名更新配置
+func updateCertDomains(certCfg *config.CertConfig, certPEM string) {
+	domains, err := cert.ExtractDomainsFromPEM(certPEM)
+	if err != nil || len(domains) == 0 {
+		return // 提取失败，保持原值
+	}
+	certCfg.Domain = domains[0]
+	certCfg.Domains = domains
+	log.Printf("从证书提取域名: %v", domains)
 }
 
 // CallbackTimeout 回调超时时间
@@ -592,7 +733,7 @@ func CheckAndDeploy() error {
 
 	store := cert.NewOrderStore()
 	deployer := DefaultDeployer(cfg, store)
-	results := AutoDeploy(cfg, deployer)
+	results := AutoDeploy(cfg, deployer, true)
 
 	// 等待所有回调 goroutine 完成
 	deployer.WaitCallbacks()

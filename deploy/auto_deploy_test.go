@@ -30,7 +30,7 @@ func TestAutoDeploy_NoCertificates(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d)
+	results := AutoDeploy(cfg, d, false)
 
 	if len(results) != 0 {
 		t.Errorf("没有配置证书时应该返回空结果，得到 %d 个结果", len(results))
@@ -46,7 +46,7 @@ func TestAutoDeploy_NoAPIConfig(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d)
+	results := AutoDeploy(cfg, d, false)
 
 	// 无 API 配置应该返回失败结果
 	if len(results) != 1 {
@@ -66,7 +66,7 @@ func TestAutoDeploy_DisabledCertificate(t *testing.T) {
 	}
 
 	d := NewMockDeployer()
-	results := AutoDeploy(cfg, d)
+	results := AutoDeploy(cfg, d, false)
 
 	if len(results) != 0 {
 		t.Errorf("禁用的证书应该被跳过，得到 %d 个结果", len(results))
@@ -232,7 +232,8 @@ func TestHandleProcessingOrder(t *testing.T) {
 				Domain:  "example.com",
 			}
 
-			reason, err := handleProcessingOrder(cfg, tt.certData)
+			d := NewMockDeployer()
+			_, reason, err := handleProcessingOrder(d, cfg, tt.certData)
 
 			if err != nil {
 				t.Errorf("handleProcessingOrder() error = %v", err)
@@ -1154,7 +1155,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d)
+		results := AutoDeploy(cfg, d, false)
 
 		if len(results) != 1 {
 			t.Fatalf("期望 1 个结果，得到 %d 个", len(results))
@@ -1195,7 +1196,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 			},
 		}
 
-		results := AutoDeploy(cfg, d)
+		results := AutoDeploy(cfg, d, false)
 
 		if len(results) != 2 {
 			t.Fatalf("期望 2 个结果，得到 %d 个", len(results))

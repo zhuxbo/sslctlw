@@ -207,13 +207,14 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			fmt.Sscanf(portStr, "%d", &port)
 		}
 
+		// 查询当前绑定（域名为空时查询 IP 绑定）
+		var binding *iis.SSLBinding
+		var err error
 		if domain == "" {
-			txtCurrentBinding.SetText("(请输入域名)")
-			return
+			binding, err = iis.GetBindingForIP("0.0.0.0", port)
+		} else {
+			binding, err = iis.GetBindingForHost(domain, port)
 		}
-
-		// 先尝试精确查询
-		binding, err := iis.GetBindingForHost(domain, port)
 		if err != nil {
 			txtCurrentBinding.SetText(fmt.Sprintf("查询失败: %v", err))
 			return
@@ -306,11 +307,6 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 		portStr := strings.TrimSpace(txtPort.Text())
 		certIdx := cmbCert.Items.Selected()
 
-		if domain == "" {
-			ui.MsgOk(dlg, "提示", "请输入域名", "请输入或选择要绑定的域名。")
-			return
-		}
-
 		port := 443
 		if portStr != "" {
 			fmt.Sscanf(portStr, "%d", &port)
@@ -361,7 +357,6 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 			}
 
 			if !hasBinding {
-				// 创建 https 绑定（启用 SNI）
 				if err := iis.AddHttpsBinding(siteName, domain, port); err != nil {
 					dlg.UiThread(func() {
 						if dlgCtx.Err() != nil {
@@ -376,8 +371,13 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 				}
 			}
 
-			// 绑定证书
-			err := iis.BindCertificate(domain, port, selectedCert.Thumbprint)
+			// 绑定证书（域名为空时使用 IP 绑定）
+			var err error
+			if domain == "" {
+				err = iis.BindCertificateByIP("0.0.0.0", port, selectedCert.Thumbprint)
+			} else {
+				err = iis.BindCertificate(domain, port, selectedCert.Thumbprint)
+			}
 
 			dlg.UiThread(func() {
 				if dlgCtx.Err() != nil {

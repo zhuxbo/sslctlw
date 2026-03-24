@@ -18,6 +18,7 @@ import (
 
 	"github.com/rodrigocfd/windigo/co"
 	"github.com/rodrigocfd/windigo/ui"
+	"github.com/rodrigocfd/windigo/win"
 )
 
 // 调试模式
@@ -176,7 +177,7 @@ func RunApp() {
 
 	app.btnInstall = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
-			Text("导入证书").
+			Text("管理证书").
 			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+MarginMedium+ButtonWidthMedium+MarginMedium, MarginMedium)).
 			Width(ui.DpiX(ButtonWidthMedium)).
 			Height(ui.DpiY(ButtonHeight)),
@@ -408,9 +409,16 @@ func RunApp() {
 		})
 	})
 
+	// 双击站点列表打开绑定窗口
+	app.siteList.On().NmDblClk(func(_ *win.NMITEMACTIVATE) {
+		app.withPausedTaskUpdate(func() {
+			app.onBindCert()
+		})
+	})
+
 	app.btnInstall.On().BnClicked(func() {
 		app.withPausedTaskUpdate(func() {
-			ShowInstallDialog(app.mainWnd, func() {
+			ShowCertStoreDialog(app.mainWnd, func() {
 				app.doLoadDataAsync(nil)
 			})
 		})

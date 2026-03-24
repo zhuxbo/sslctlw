@@ -37,8 +37,8 @@ func CreateTask(taskName string) error {
 		return fmt.Errorf("获取程序路径失败: %v", err)
 	}
 
-	// 构建命令: 程序路径 + -auto 参数
-	taskRun := fmt.Sprintf("\"%s\" -auto", exePath)
+	// 构建命令: 程序路径 + deploy --all
+	taskRun := fmt.Sprintf("\"%s\" deploy --all", exePath)
 
 	// 删除已存在的任务（如果有）
 	DeleteTask(taskName)

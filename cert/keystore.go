@@ -44,14 +44,17 @@ func DecryptPrivateKey(encrypted string) (string, error) {
 
 // OrderMeta 订单元数据
 type OrderMeta struct {
-	OrderID      int      `json:"order_id"`
-	Domain       string   `json:"domain"`
-	Domains      []string `json:"domains"`
-	Status       string   `json:"status"`
-	ExpiresAt    string   `json:"expires_at"`
-	CreatedAt    string   `json:"created_at"`
-	LastDeployed string   `json:"last_deployed,omitempty"`
-	Thumbprint   string   `json:"thumbprint,omitempty"`
+	OrderID         int      `json:"order_id"`
+	Domain          string   `json:"domain"`
+	Domains         []string `json:"domains"`
+	Status          string   `json:"status"`
+	ExpiresAt       string   `json:"expires_at"`
+	CreatedAt       string   `json:"created_at"`
+	LastDeployed    string   `json:"last_deployed,omitempty"`
+	Thumbprint      string   `json:"thumbprint,omitempty"`
+	IssueRetryCount int      `json:"issue_retry_count,omitempty"` // CSR 提交重试次数
+	LastIssueState  string   `json:"last_issue_state,omitempty"`  // 上次签发状态
+	CSRSubmittedAt  string   `json:"csr_submitted_at,omitempty"`  // CSR 提交时间
 }
 
 // OrderStore 本地订单存储

@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"regexp"
 	"testing"
 	"time"
@@ -189,6 +190,108 @@ func TestVerifyKeyPair_Mismatch(t *testing.T) {
 	}
 	if match {
 		t.Error("VerifyKeyPair() 应该返回 false，不匹配的证书和密钥对返回了 true")
+	}
+}
+
+func TestExtractDomainsFromPEM_Valid(t *testing.T) {
+	certPEM, _ := generateTestCertAndKey()
+
+	domains, err := ExtractDomainsFromPEM(certPEM)
+	if err != nil {
+		t.Fatalf("ExtractDomainsFromPEM() error: %v", err)
+	}
+	// generateTestCertAndKey: CN=test.example.com, SAN=[test.example.com, www.test.example.com]
+	// CN 与第一个 SAN 重复，去重后应为 2 个
+	if len(domains) != 2 {
+		t.Fatalf("ExtractDomainsFromPEM() 域名数量 = %d, want 2, got %v", len(domains), domains)
+	}
+	if domains[0] != "test.example.com" {
+		t.Errorf("ExtractDomainsFromPEM() 首个域名 = %q, want %q", domains[0], "test.example.com")
+	}
+	if domains[1] != "www.test.example.com" {
+		t.Errorf("ExtractDomainsFromPEM() 第二个域名 = %q, want %q", domains[1], "www.test.example.com")
+	}
+}
+
+func TestExtractDomainsFromPEM_OnlySANUsed(t *testing.T) {
+	// SAN 必定包含 CN，只使用 DNSNames
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(100),
+		Subject:      pkix.Name{CommonName: "main.example.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		DNSNames:     []string{"a.example.com", "b.example.com"},
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	certBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	domains, err := ExtractDomainsFromPEM(string(certBlock))
+	if err != nil {
+		t.Fatalf("ExtractDomainsFromPEM() error: %v", err)
+	}
+	// 只使用 SAN，CN 不在 SAN 中则不出现
+	if len(domains) != 2 {
+		t.Fatalf("ExtractDomainsFromPEM() 域名数量 = %d, want 2, got %v", len(domains), domains)
+	}
+}
+
+func TestExtractDomainsFromPEM_CNIsIP(t *testing.T) {
+	// CN 为 IP 地址，应被跳过，只保留 SAN 域名
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(200),
+		Subject:      pkix.Name{CommonName: "192.168.1.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		DNSNames:     []string{"example.com"},
+		IPAddresses:  []net.IP{net.ParseIP("192.168.1.1")},
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	certBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	domains, err := ExtractDomainsFromPEM(string(certBlock))
+	if err != nil {
+		t.Fatalf("ExtractDomainsFromPEM() error: %v", err)
+	}
+	// CN 是 IP 应被过滤，只剩 SAN 中的 DNS 域名
+	if len(domains) != 1 {
+		t.Fatalf("ExtractDomainsFromPEM() 域名数量 = %d, want 1, got %v", len(domains), domains)
+	}
+	if domains[0] != "example.com" {
+		t.Errorf("ExtractDomainsFromPEM() 域名 = %q, want %q", domains[0], "example.com")
+	}
+}
+
+func TestExtractDomainsFromPEM_CNIsIPNoSAN(t *testing.T) {
+	// CN 为 IP 且无 SAN 域名，返回空列表
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(300),
+		Subject:      pkix.Name{CommonName: "10.0.0.1"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		IPAddresses:  []net.IP{net.ParseIP("10.0.0.1")},
+	}
+	certDER, _ := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	certBlock := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+
+	domains, err := ExtractDomainsFromPEM(string(certBlock))
+	if err != nil {
+		t.Fatalf("ExtractDomainsFromPEM() error: %v", err)
+	}
+	if len(domains) != 0 {
+		t.Fatalf("ExtractDomainsFromPEM() 域名数量 = %d, want 0, got %v", len(domains), domains)
+	}
+}
+
+func TestExtractDomainsFromPEM_Invalid(t *testing.T) {
+	_, err := ExtractDomainsFromPEM("invalid pem")
+	if err == nil {
+		t.Error("ExtractDomainsFromPEM() 应对无效 PEM 返回错误")
 	}
 }
 

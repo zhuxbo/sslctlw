@@ -30,6 +30,9 @@ func BindCertificate(hostname string, port int, certHash string) error {
 	}
 
 	// 参数验证
+	if hostname == "" {
+		return fmt.Errorf("主机名不能为空，IP 绑定请使用 BindCertificateByIP")
+	}
 	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}
@@ -165,6 +168,9 @@ func UnbindCertificate(hostname string, port int) error {
 	}
 
 	// 参数验证
+	if hostname == "" {
+		return fmt.Errorf("主机名不能为空，IP 绑定请使用 UnbindCertificateByIP")
+	}
 	if err := util.ValidateDomain(hostname); err != nil {
 		return fmt.Errorf("无效的主机名: %w", err)
 	}

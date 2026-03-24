@@ -179,7 +179,7 @@ func deploySingleCert(orderID int) error {
 		RenewDays:    cfg.RenewDays,
 	}
 	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
-	results := deploy.AutoDeploy(singleCfg, deployer)
+	results := deploy.AutoDeploy(singleCfg, deployer, false)
 	deployer.WaitCallbacks()
 
 	for _, r := range results {

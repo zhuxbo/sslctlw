@@ -96,6 +96,27 @@ func GetCertSerialNumber(certPEM string) (string, error) {
 	return fmt.Sprintf("%X", cert.SerialNumber), nil
 }
 
+// ExtractDomainsFromPEM 从证书 PEM 提取域名列表（CN + SAN 去重）
+// 返回去重后的域名列表，CN 在首位
+func ExtractDomainsFromPEM(certPEM string) ([]string, error) {
+	cert, err := ParseCertificate(certPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	// SAN (DNSNames) 必定包含 CN，直接使用 DNSNames
+	seen := make(map[string]bool)
+	var domains []string
+	for _, d := range cert.DNSNames {
+		if d != "" && !seen[d] {
+			seen[d] = true
+			domains = append(domains, d)
+		}
+	}
+
+	return domains, nil
+}
+
 // normalizeSerialNumber 规范化序列号（去除空格、前导零，转大写）
 func normalizeSerialNumber(sn string) string {
 	// 去除空格
