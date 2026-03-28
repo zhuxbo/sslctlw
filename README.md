@@ -22,8 +22,10 @@
 ## 安装
 
 ```powershell
-# PowerShell 一键安装
-irm https://release.example.com/sslctlw/install.ps1 | iex
+# PowerShell 一键安装（管理员权限）
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+irm https://release.example.com/sslctlw/install.ps1 -OutFile install.ps1
+.\install.ps1 -ReleaseHost release.example.com
 ```
 
 或手动下载 `sslctlw.exe` 到 `C:\sslctlw\` 并添加到 PATH。

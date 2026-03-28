@@ -43,8 +43,9 @@ func CreateTask(taskName string) error {
 	// 删除已存在的任务（如果有）
 	DeleteTask(taskName)
 
-	// 随机生成每天执行时间 (00:00 ~ 23:59)
-	startTime := fmt.Sprintf("%02d:%02d", rand.IntN(24), rand.IntN(60))
+	// 随机生成每天执行时间 (09:00 ~ 23:59)
+	// 服务端 0-8 点自动签发，9 点后拉取确保证书已签发
+	startTime := fmt.Sprintf("%02d:%02d", 9+rand.IntN(15), rand.IntN(60))
 
 	// 创建任务
 	// /sc DAILY: 每天执行一次

@@ -185,7 +185,7 @@ func RunApp() {
 
 	app.btnAPI = ui.NewButton(app.mainWnd,
 		ui.OptsButton().
-			Text("部署接口").
+			Text("一键部署").
 			Position(ui.Dpi(MarginMedium+ButtonWidthSmall+3*(ButtonWidthMedium+MarginMedium)-ButtonWidthMedium, MarginMedium)).
 			Width(ui.DpiX(ButtonWidthMedium)).
 			Height(ui.DpiY(ButtonHeight)),
@@ -465,10 +465,6 @@ func RunApp() {
 		// 取消所有后台 goroutine
 		if app.cancelCtx != nil {
 			app.cancelCtx()
-		}
-		// 停止后台任务
-		if app.bgTask != nil {
-			app.bgTask.Stop()
 		}
 		// 关闭调试模式
 		CloseDebugMode()
@@ -805,22 +801,30 @@ func getCertInfoForSite(site iis.SiteInfo, sslBindings []iis.SSLBinding, certs [
 		}
 
 		for _, ssl := range sslBindings {
-			hostPort := fmt.Sprintf("%s:%d", b.Host, b.Port)
-			if strings.EqualFold(ssl.HostnamePort, hostPort) ||
-				strings.HasSuffix(ssl.HostnamePort, fmt.Sprintf(":%d", b.Port)) {
-				thumbprint := strings.ToUpper(strings.ReplaceAll(ssl.CertHash, " ", ""))
-				for _, c := range certs {
-					if c.Thumbprint == thumbprint {
-						name := cert.GetCertDisplayName(&c)
-						expiry := c.NotAfter.Format("2006-01-02")
-						return name, expiry
-					}
-				}
-				if len(ssl.CertHash) >= 16 {
-					return ssl.CertHash[:16] + "...", ""
-				}
-				return ssl.CertHash, ""
+			var matched bool
+			if b.Host != "" {
+				// 有主机名：精确匹配 SNI 绑定
+				matched = !ssl.IsIPBinding && strings.EqualFold(ssl.HostnamePort, fmt.Sprintf("%s:%d", b.Host, b.Port))
+			} else {
+				// 空主机名：匹配 IP 绑定，端口一致即可
+				matched = ssl.IsIPBinding && strings.HasSuffix(ssl.HostnamePort, fmt.Sprintf(":%d", b.Port))
 			}
+			if !matched {
+				continue
+			}
+
+			thumbprint := strings.ToUpper(strings.ReplaceAll(ssl.CertHash, " ", ""))
+			for _, c := range certs {
+				if c.Thumbprint == thumbprint {
+					name := cert.GetCertDisplayName(&c)
+					expiry := c.NotAfter.Format("2006-01-02")
+					return name, expiry
+				}
+			}
+			if len(ssl.CertHash) >= 16 {
+				return ssl.CertHash[:16] + "...", ""
+			}
+			return ssl.CertHash, ""
 		}
 	}
 	return "", ""

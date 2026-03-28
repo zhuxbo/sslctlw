@@ -204,12 +204,8 @@ upload_to_server() {
     scp_cmd "$DIST_DIR/$EXE_NAME" "$SERVER_HOST" "$SERVER_PORT" "$remote_dir/"
 
     # 上传 install.ps1
-    [[ "$SERVER_URL" == *"|"* ]] && { log_error "SERVER_URL 含非法字符"; return 1; }
     log_info "上传 install.ps1..."
-    local tmp=$(mktemp)
-    sed "s|__RELEASE_URL__|$SERVER_URL|g" "$PROJECT_ROOT/build/install.ps1" > "$tmp"
-    scp_cmd "$tmp" "$SERVER_HOST" "$SERVER_PORT" "$SERVER_DIR/install.ps1"
-    rm -f "$tmp"
+    scp_cmd "$PROJECT_ROOT/build/install.ps1" "$SERVER_HOST" "$SERVER_PORT" "$SERVER_DIR/install.ps1"
 
     update_releases_json_remote "$server_str" "$version" "$channel"
 
@@ -335,7 +331,12 @@ main() {
         echo ""
         for server in "${SERVERS[@]}"; do
             parse_server "$server"
-            [ -z "$target_server" ] || [ "$SERVER_NAME" = "$target_server" ] && echo "  curl $SERVER_URL/releases.json | jq ."
+            if [ -z "$target_server" ] || [ "$SERVER_NAME" = "$target_server" ]; then
+                echo "  curl $SERVER_URL/releases.json | jq ."
+                local host
+                host=$(echo "$SERVER_URL" | sed 's|https://||' | sed 's|/sslctlw||')
+                echo "  安装: [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm $SERVER_URL/install.ps1 -OutFile install.ps1; .\\install.ps1 -ReleaseHost $host"
+            fi
         done
     fi
     return $failed

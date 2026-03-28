@@ -169,6 +169,10 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 			}
 
 			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+			if daysUntilExpiry < 0 {
+				log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+				continue
+			}
 			if daysUntilExpiry > cfg.RenewDays {
 				log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.RenewDays)
 				continue
@@ -191,8 +195,9 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		}
 		results = append(results, deployResults...)
 
-		// 更新配置中的订单 ID
-		if certCfg.UseLocalKey && certCfg.OrderID != certData.OrderID {
+		// 更新配置中的订单 ID（续费后 API 返回新订单号）
+		if certCfg.OrderID != certData.OrderID {
+			log.Printf("订单号更新: %d -> %d", certCfg.OrderID, certData.OrderID)
 			cfg.Certificates[i].OrderID = certData.OrderID
 		}
 
@@ -372,10 +377,14 @@ func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *ap
 func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 	expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 	if err != nil {
-		log.Printf("解析过期时间失败: %v，继续检查私钥", err)
-		return true, "" // 解析失败时继续处理
+		log.Printf("解析过期时间失败: %v，跳过", err)
+		return false, "解析过期时间失败"
 	}
 	daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+	if daysUntilExpiry < 0 {
+		log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+		return false, fmt.Sprintf("已过期 %d 天，需人工介入", -daysUntilExpiry)
+	}
 	if daysUntilExpiry > renewDays {
 		log.Printf("证书 %s 还有 %d 天过期，未到续签时间（>%d天）", certData.Domain(), daysUntilExpiry, renewDays)
 		return false, fmt.Sprintf("未到续签时间（还有 %d 天）", daysUntilExpiry)

@@ -109,15 +109,15 @@ func TestCheckRenewalNeeded(t *testing.T) {
 			name:       "已过期",
 			expiresAt:  now.AddDate(0, 0, -5).Format("2006-01-02"),
 			renewDays:  15,
-			wantRenew:  true,
-			wantReason: false,
+			wantRenew:  false, // 已过期需人工介入
+			wantReason: true,
 		},
 		{
 			name:       "无效日期格式",
 			expiresAt:  "invalid",
 			renewDays:  15,
-			wantRenew:  true, // 解析失败时继续处理
-			wantReason: false,
+			wantRenew:  false, // 解析失败跳过
+			wantReason: true,
 		},
 	}
 

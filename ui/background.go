@@ -25,51 +25,23 @@ const (
 	TaskStatusFailed
 )
 
-// BackgroundTask 后台任务
+// BackgroundTask 后台任务（仅支持手动触发，不做定时轮询）
 type BackgroundTask struct {
-	mu           sync.Mutex
-	status       TaskStatus
-	message      string
-	lastRun      time.Time
-	nextRun      time.Time
-	interval     time.Duration
-	running      bool
-	checkMu      sync.Mutex
-	checking     bool
-	stopChan     chan struct{}
-	resetChan    chan struct{} // 通知 runLoop 重建 ticker
-	onUpdate     func()
-	results      []deploy.Result
-	checkEnabled bool
+	mu       sync.Mutex
+	status   TaskStatus
+	message  string
+	lastRun  time.Time
+	checkMu  sync.Mutex
+	checking bool
+	onUpdate func()
+	results  []deploy.Result
 }
 
 // NewBackgroundTask 创建后台任务
 func NewBackgroundTask() *BackgroundTask {
 	return &BackgroundTask{
-		status:       TaskStatusIdle,
-		message:      "未启动",
-		interval:     1 * time.Hour, // 默认每小时检查一次
-		stopChan:     make(chan struct{}),
-		resetChan:    make(chan struct{}, 1),
-		checkEnabled: false,
-	}
-}
-
-// SetInterval 设置检查间隔
-func (t *BackgroundTask) SetInterval(d time.Duration) {
-	t.mu.Lock()
-	t.interval = d
-	running := t.running
-	if running {
-		t.nextRun = time.Now().Add(d)
-	}
-	t.mu.Unlock()
-	// 通知 runLoop 重建 ticker
-	if running {
-		select {
-		case t.resetChan <- struct{}{}:
-		default:
-		}
+		status:  TaskStatusIdle,
+		message: "未启动",
 	}
 }
 
@@ -80,63 +52,11 @@ func (t *BackgroundTask) SetOnUpdate(fn func()) {
 	t.onUpdate = fn
 }
 
-// Start 启动定时任务
-func (t *BackgroundTask) Start() {
-	t.mu.Lock()
-	if t.running {
-		t.mu.Unlock()
-		return
-	}
-	t.running = true
-	t.checkEnabled = true
-	t.stopChan = make(chan struct{})
-	t.resetChan = make(chan struct{}, 1)
-	t.mu.Unlock()
-
-	go t.runLoop()
-}
-
-// Stop 停止定时任务
-func (t *BackgroundTask) Stop() {
-	t.mu.Lock()
-	if !t.running {
-		t.mu.Unlock()
-		return
-	}
-	t.running = false
-	t.checkEnabled = false
-	close(t.stopChan)
-	t.mu.Unlock()
-
-	t.updateStatus(TaskStatusIdle, "已停止")
-}
-
-// IsRunning 是否正在运行
-func (t *BackgroundTask) IsRunning() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.running
-}
-
-// IsCheckEnabled 是否启用定时检测
-func (t *BackgroundTask) IsCheckEnabled() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.checkEnabled
-}
-
 // GetStatus 获取状态信息
 func (t *BackgroundTask) GetStatus() (TaskStatus, string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.status, t.message
-}
-
-// GetNextRun 获取下次运行时间
-func (t *BackgroundTask) GetNextRun() time.Time {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.nextRun
 }
 
 // GetLastRun 获取上次运行时间
@@ -161,41 +81,6 @@ func (t *BackgroundTask) RunOnce() {
 // RunOnceSync 同步执行一次检测（阻塞直到完成）
 func (t *BackgroundTask) RunOnceSync() {
 	t.doCheck()
-}
-
-// runLoop 主循环
-func (t *BackgroundTask) runLoop() {
-	t.updateStatus(TaskStatusIdle, "定时检测已启动")
-
-	// 启动时立即检查一次
-	t.doCheck()
-
-	t.mu.Lock()
-	interval := t.interval
-	t.nextRun = time.Now().Add(interval)
-	t.mu.Unlock()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-t.stopChan:
-			return
-		case <-t.resetChan:
-			// 间隔已变更，重建 ticker
-			ticker.Stop()
-			t.mu.Lock()
-			interval = t.interval
-			t.mu.Unlock()
-			ticker = time.NewTicker(interval)
-		case <-ticker.C:
-			t.doCheck()
-			t.mu.Lock()
-			t.nextRun = time.Now().Add(t.interval)
-			t.mu.Unlock()
-		}
-	}
 }
 
 // doCheck 执行检查
@@ -258,7 +143,6 @@ func (t *BackgroundTask) doCheck() {
 // updateStatus 更新状态（带防抖动：相同状态和消息时跳过更新）
 func (t *BackgroundTask) updateStatus(status TaskStatus, message string) {
 	t.mu.Lock()
-	// 如果状态和消息都没变化，跳过更新
 	if t.status == status && t.message == message {
 		t.mu.Unlock()
 		return
