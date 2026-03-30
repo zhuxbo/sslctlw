@@ -73,14 +73,6 @@ func (d *defaultOrderStore) LoadCertificate(orderID int) (certPEM, chainPEM stri
 	return d.store.LoadCertificate(orderID)
 }
 
-func (d *defaultOrderStore) SaveMeta(orderID int, meta *cert.OrderMeta) error {
-	return d.store.SaveMeta(orderID, meta)
-}
-
-func (d *defaultOrderStore) LoadMeta(orderID int) (*cert.OrderMeta, error) {
-	return d.store.LoadMeta(orderID)
-}
-
 func (d *defaultOrderStore) ListOrders() ([]int, error) {
 	return d.store.ListOrders()
 }

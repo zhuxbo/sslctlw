@@ -8,16 +8,10 @@ import (
 // ReleaseChecker 版本检测接口
 type ReleaseChecker interface {
 	// CheckUpdate 检查是否有可用更新
-	// channel: "stable" 或 "beta"
+	// channel: "main" 或 "dev"
 	// currentVersion: 当前版本号（如 "1.2.3"）
 	// 返回: 最新版本信息，如果没有更新返回 nil
 	CheckUpdate(ctx context.Context, channel string, currentVersion string) (*ReleaseInfo, error)
-
-	// GetUpgradePath 获取升级路径（用于链式跨版本升级）
-	// currentVersion: 当前版本
-	// targetVersion: 目标版本
-	// 返回: 升级路径（包含中间版本），如果可以直接升级返回 nil
-	GetUpgradePath(ctx context.Context, currentVersion, targetVersion string) (*UpgradePath, error)
 }
 
 // ProgressCallback 进度回调函数

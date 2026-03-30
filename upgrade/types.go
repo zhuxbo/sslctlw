@@ -15,9 +15,14 @@ var (
 type Channel string
 
 const (
-	ChannelStable Channel = "stable"
-	ChannelBeta   Channel = "beta"
+	ChannelMain Channel = "main"
+	ChannelDev  Channel = "dev"
 )
+
+// ValidChannel 校验通道值是否合法（防止路径注入）
+func ValidChannel(ch Channel) bool {
+	return ch == ChannelMain || ch == ChannelDev
+}
 
 // ReleaseInfo 版本信息
 type ReleaseInfo struct {
@@ -25,40 +30,8 @@ type ReleaseInfo struct {
 	Channel      Channel   `json:"channel"`       // 版本通道
 	ReleaseDate  time.Time `json:"release_date"`  // 发布日期
 	DownloadURL  string    `json:"download_url"`  // EXE 下载地址
+	Checksum     string    `json:"checksum"`      // SHA256 校验值 "sha256:..."
 	FileSize     int64     `json:"file_size"`     // 文件大小（字节）
-	ReleaseNotes string    `json:"release_notes"` // 更新说明
-	MinVersion   string    `json:"min_version"`   // 最低要求版本（不可跳过版本）
-}
-
-// UpgradePath 升级路径（用于链式跨版本升级）
-type UpgradePath struct {
-	Steps []UpgradeStep `json:"steps"` // 升级步骤列表（按顺序执行）
-}
-
-// UpgradeStep 升级步骤
-type UpgradeStep struct {
-	Version      string `json:"version"`       // 目标版本
-	DownloadURL  string `json:"download_url"`  // 下载地址
-	FileSize     int64  `json:"file_size"`     // 文件大小
-	ReleaseNotes string `json:"release_notes"` // 更新说明
-}
-
-// ReleaseResponse GitHub Release API 响应结构
-type ReleaseResponse struct {
-	TagName     string         `json:"tag_name"`
-	Name        string         `json:"name"`
-	Body        string         `json:"body"`
-	Prerelease  bool           `json:"prerelease"`
-	PublishedAt string         `json:"published_at"`
-	Assets      []ReleaseAsset `json:"assets"`
-}
-
-// ReleaseAsset 发布附件
-type ReleaseAsset struct {
-	Name               string `json:"name"`
-	Size               int64  `json:"size"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-	ContentType        string `json:"content_type"`
 }
 
 // VerifyResult 签名验证结果
@@ -159,7 +132,7 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		Enabled:       true,
-		Channel:       ChannelStable,
+		Channel:       ChannelMain,
 		CheckInterval: 24,
 		ReleaseURL:    "", // 需要用户配置
 

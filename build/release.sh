@@ -120,88 +120,111 @@ ensure_tag() {
 }
 
 # ========================================
-# 远程更新 releases.json
+# 远程更新 releases.json（spec 6.1, 8.4）
+# 通道做顶层 key，每通道 {latest, versions[{version, released_at, checksums}]}
 # ========================================
 update_releases_json_remote() {
     local server_str="$1" version="$2" channel="$3"
     parse_server "$server_str"
     log_info "更新 releases.json..."
 
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "RELEASES_FILE='$SERVER_DIR/releases.json' VERSION='$version' CHANNEL='$channel' python3 << 'PYEOF'
-import json, os
-from datetime import datetime
-rf = os.environ['RELEASES_FILE']
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "SERVER_DIR='$SERVER_DIR' VERSION='$version' CHANNEL='$channel' python3 << 'PYEOF'
+import json, os, hashlib, datetime
+sd = os.environ['SERVER_DIR']
 ver = os.environ['VERSION']
 ch = os.environ['CHANNEL']
 v_ver = ver if ver.startswith('v') else f'v{ver}'
-data = {'channels': {}}
+strip = lambda s: s.lstrip('v')
+rf = os.path.join(sd, 'releases.json')
+data = {}
 if os.path.exists(rf):
     try:
         with open(rf) as f: data = json.load(f)
     except: pass
-if 'channels' not in data: data['channels'] = {}
-if ch not in data['channels']: data['channels'][ch] = {'versions': []}
-versions = data['channels'][ch]['versions']
-entry = {
-    'version': v_ver, 'date': datetime.now().strftime('%Y-%m-%d'),
-    'path': f'{ch}/{v_ver}',
-    'files': {'windows-amd64': f'{ch}/{v_ver}/sslctlw.exe'}
-}
-strip = lambda s: s[1:] if s.startswith('v') else s
-existing = [i for i, v in enumerate(versions) if strip(v['version']) == strip(v_ver)]
-if existing: versions[existing[0]] = entry
-else: versions.insert(0, entry)
-data['channels'][ch]['latest'] = v_ver
-data['latest_main'] = data['channels'].get('main', {}).get('latest', '')
-data['latest_dev'] = data['channels'].get('dev', {}).get('latest', '')
+# 确保通道存在
+if ch not in data: data[ch] = {'latest': '', 'versions': []}
+ch_data = data[ch]
+if 'versions' not in ch_data: ch_data['versions'] = []
+# 产物文件名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
+artifact = 'sslctlw-windows-amd64.exe'
+# 计算 SHA256（spec 6.1: checksums 按文件名索引）
+exe_path = os.path.join(sd, ch, v_ver, artifact)
+checksums = {}
+if os.path.exists(exe_path):
+    h = hashlib.sha256()
+    with open(exe_path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''): h.update(chunk)
+    checksums[artifact] = f'sha256:{h.hexdigest()}'
+entry = {'version': strip(v_ver), 'released_at': datetime.date.today().isoformat(), 'checksums': checksums}
+existing = [i for i, v in enumerate(ch_data['versions']) if strip(v['version']) == strip(v_ver)]
+if existing: ch_data['versions'][existing[0]] = entry
+else: ch_data['versions'].insert(0, entry)
+ch_data['latest'] = strip(v_ver)
 with open(rf, 'w') as f: json.dump(data, f, indent=2)
 os.chmod(rf, 0o644)
-print(f'已更新: {ch}/{v_ver}')
+print(f'已更新: {ch}/{strip(v_ver)}')
 PYEOF"
 }
 
 # ========================================
-# 清理旧版本
+# 清理旧版本（spec 8.4: 每通道保留 KEEP_VERSIONS 个）
 # ========================================
 cleanup_old_versions_remote() {
     local server_str="$1" channel="$2"
     parse_server "$server_str"
-    log_info "清理旧版本（保留 $KEEP_VERSIONS 个）..."
+    log_info "清理旧版本（$channel 通道保留 $KEEP_VERSIONS 个）..."
 
+    # 清理产物目录
     ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "
         cd \"$SERVER_DIR/$channel\" 2>/dev/null || exit 0
         removed=\$(ls -dt v* 2>/dev/null | tail -n +$((KEEP_VERSIONS + 1)))
         [ -n \"\$removed\" ] && echo \"\$removed\" | xargs -r rm -rf
     "
 
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "python3 << 'PYEOF'
+    # 同步 releases.json：移除已删除目录对应的条目
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "SERVER_DIR='$SERVER_DIR' CHANNEL='$channel' python3 << 'PYEOF'
 import json, os
-rf, ch, cd = '$SERVER_DIR/releases.json', '$channel', '$SERVER_DIR/$channel'
+sd = os.environ['SERVER_DIR']
+ch = os.environ['CHANNEL']
+rf = os.path.join(sd, 'releases.json')
+cd = os.path.join(sd, ch)
 if not os.path.exists(rf): exit(0)
 with open(rf) as f: data = json.load(f)
-if 'channels' not in data or ch not in data['channels']: exit(0)
+if ch not in data: exit(0)
+ch_data = data[ch]
 existing = {d for d in os.listdir(cd) if d.startswith('v')} if os.path.isdir(cd) else set()
-data['channels'][ch]['versions'] = [v for v in data['channels'][ch].get('versions', []) if v['version'] in existing]
-data['latest_main'] = data['channels'].get('main', {}).get('latest', '')
-data['latest_dev'] = data['channels'].get('dev', {}).get('latest', '')
+strip = lambda s: s.lstrip('v')
+ch_data['versions'] = [v for v in ch_data.get('versions', []) if f'v{strip(v[\"version\"])}' in existing]
+if ch_data['versions']:
+    ch_data['latest'] = ch_data['versions'][0]['version']
+else:
+    ch_data['latest'] = ''
 with open(rf, 'w') as f: json.dump(data, f, indent=2)
 os.chmod(rf, 0o644)
 PYEOF"
 }
 
 # ========================================
-# 上传到服务器
+# 上传到服务器（spec 8.2: {channel}/v{version}/）
 # ========================================
 upload_to_server() {
     local server_str="$1" version="$2" channel="$3"
     parse_server "$server_str"
     log_step "部署到 $SERVER_NAME ($SERVER_HOST)..."
 
-    local remote_dir="$SERVER_DIR/$channel/$version"
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "mkdir -p \"$remote_dir\" && rm -f \"$remote_dir\"/$EXE_NAME"
+    # 产物命名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
+    local artifact="sslctlw-windows-amd64.exe"
 
-    log_info "上传 $EXE_NAME..."
-    scp_cmd "$DIST_DIR/$EXE_NAME" "$SERVER_HOST" "$SERVER_PORT" "$remote_dir/"
+    # 目录结构: {server_dir}/{channel}/v{version}/（spec 8.2）
+    local remote_dir="$SERVER_DIR/$channel/$version"
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "mkdir -p \"$remote_dir\" && rm -f \"$remote_dir\"/$artifact"
+
+    log_info "上传 $artifact..."
+    scp_cmd "$DIST_DIR/$EXE_NAME" "$SERVER_HOST" "$SERVER_PORT" "$remote_dir/$artifact"
+
+    # 生成 SHA256 校验文件
+    log_info "生成 SHA256 校验文件..."
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "cd \"$remote_dir\" && sha256sum $artifact > $artifact.sha256 2>/dev/null || shasum -a 256 $artifact > $artifact.sha256"
 
     # 上传 install.ps1
     log_info "上传 install.ps1..."
@@ -209,15 +232,7 @@ upload_to_server() {
 
     update_releases_json_remote "$server_str" "$version" "$channel"
 
-    # latest 符号链接
-    local latest_dir="$SERVER_DIR/latest"
-    [ "$channel" = "dev" ] && latest_dir="$SERVER_DIR/dev-latest"
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "
-        mkdir -p \"$latest_dir\" && cd \"$latest_dir\"
-        rm -f \"$EXE_NAME\" && ln -s \"../$channel/$version/$EXE_NAME\" \"$EXE_NAME\"
-    "
-
-    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "chmod 644 \"$SERVER_DIR/releases.json\" \"$SERVER_DIR/install.ps1\" 2>/dev/null; chmod 644 \"$remote_dir\"/$EXE_NAME 2>/dev/null"
+    ssh_cmd "$SERVER_HOST" "$SERVER_PORT" "chmod 644 \"$SERVER_DIR/releases.json\" \"$SERVER_DIR/install.ps1\" 2>/dev/null; chmod 644 \"$remote_dir\"/$artifact 2>/dev/null"
 
     cleanup_old_versions_remote "$server_str" "$channel"
     log_success "$SERVER_NAME: 部署完成"

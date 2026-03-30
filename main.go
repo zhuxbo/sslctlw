@@ -176,7 +176,7 @@ func deploySingleCert(orderID int) error {
 	// 创建单证书配置进行部署
 	singleCfg := &config.Config{
 		Certificates: []config.CertConfig{*certCfg},
-		RenewDays:    cfg.RenewDays,
+		Schedule:     cfg.Schedule,
 	}
 	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
 	results := deploy.AutoDeploy(singleCfg, deployer, false)
@@ -214,16 +214,16 @@ func runStatus() {
 		if c.Enabled {
 			status = "启用"
 		}
-		mode := "拉取"
-		if c.UseLocalKey {
-			mode = "本地私钥"
+		mode := c.RenewMode
+		if mode == "" {
+			mode = "pull"
 		}
 		hasAPI := "无"
 		if c.API.URL != "" {
 			hasAPI = "已配置"
 		}
 		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s\n",
-			c.Domain, c.OrderID, c.ExpiresAt, status, mode, hasAPI)
+			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI)
 	}
 
 	// 计划任务状态

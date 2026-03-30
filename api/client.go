@@ -21,10 +21,11 @@ type APIResponse struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
-		Data        []CertData `json:"data"`
-		CurrentPage int        `json:"currentPage"`
-		PageSize    int        `json:"pageSize"`
-		Total       int        `json:"total"`
+		Data            []CertData `json:"data"`
+		CurrentPage     int        `json:"page"`
+		PageSize        int        `json:"page_size"`
+		Total           int        `json:"total"`
+		RenewBeforeDays int        `json:"renew_before_days"` // 服务端配置的提前续签天数
 	} `json:"data"`
 }
 
@@ -76,11 +77,12 @@ func (c *CertData) GetDomainList() []string {
 
 // Client API 客户端
 type Client struct {
-	BaseURL        string
-	Token          string
-	HTTPClient     *http.Client
-	insecureURL    bool // 非 HTTPS 且非本地地址
-	insecureReason string
+	BaseURL             string
+	Token               string
+	HTTPClient          *http.Client
+	insecureURL         bool // 非 HTTPS 且非本地地址
+	insecureReason      string
+	LastRenewBeforeDays int // 最近一次 API 响应中的 renew_before_days（0 表示未返回）
 }
 
 // API 客户端配置常量
@@ -116,7 +118,8 @@ func NewClient(baseURL, token string) *Client {
 	return c
 }
 
-// IsAllowedAPIURL 校验 API 地址是否允许（仅 HTTPS 或本地 HTTP）
+// IsAllowedAPIURL 校验 API 地址是否允许
+// 规则：HTTPS 必需（localhost 除外）+ SSRF 防护（阻止内网/元数据 IP）
 func IsAllowedAPIURL(baseURL string) (bool, string) {
 	if baseURL == "" {
 		return true, ""
@@ -127,21 +130,77 @@ func IsAllowedAPIURL(baseURL string) (bool, string) {
 		return false, "API 地址无效"
 	}
 
+	hostname := parsed.Hostname()
+	isLocal := isLoopback(hostname)
+
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":
+		// HTTPS 仍需 SSRF 检查
+		if !isLocal {
+			if reason := checkSSRF(hostname); reason != "" {
+				return false, reason
+			}
+		}
 		return true, ""
 	case "http":
-		host := strings.ToLower(parsed.Hostname())
-		if host == "localhost" {
-			return true, ""
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if isLocal {
 			return true, ""
 		}
 		return false, "API 地址必须使用 HTTPS（localhost/127.0.0.1 除外）"
 	default:
 		return false, "API 地址必须使用 HTTPS"
 	}
+}
+
+// isLoopback 判断是否为本地回环地址
+func isLoopback(hostname string) bool {
+	host := strings.ToLower(hostname)
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
+// checkSSRF 检查目标地址是否存在 SSRF 风险
+// 阻止：私有 IP、链路本地、云元数据、未指定地址
+func checkSSRF(hostname string) string {
+	// 先尝试直接解析为 IP
+	if ip := net.ParseIP(hostname); ip != nil {
+		return checkSSRFIP(ip)
+	}
+
+	// DNS 解析域名
+	ips, err := net.LookupIP(hostname)
+	if err != nil {
+		return "" // DNS 解析失败时放行，由后续 HTTP 请求报错
+	}
+	for _, ip := range ips {
+		if reason := checkSSRFIP(ip); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// checkSSRFIP 检查单个 IP 是否为禁止访问的内网地址
+func checkSSRFIP(ip net.IP) string {
+	if ip.IsPrivate() {
+		return fmt.Sprintf("禁止访问内网地址: %s", ip)
+	}
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return fmt.Sprintf("禁止访问链路本地地址: %s", ip)
+	}
+	if ip.IsUnspecified() {
+		return fmt.Sprintf("禁止访问未指定地址: %s", ip)
+	}
+	// 云元数据地址 169.254.169.254
+	if ip.Equal(net.ParseIP("169.254.169.254")) {
+		return "禁止访问云元数据地址: 169.254.169.254"
+	}
+	return ""
 }
 
 // doWithRetry 执行带重试的 HTTP 请求，支持 context 取消
@@ -442,11 +501,24 @@ func (c *Client) Callback(ctx context.Context, req *CallbackRequest) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
-		if err != nil {
-			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, err)
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		if readErr != nil {
+			return fmt.Errorf("回调失败: HTTP %d (读取响应失败: %v)", resp.StatusCode, readErr)
 		}
 		return handleHTTPError(resp.StatusCode, body)
+	}
+
+	// 读取响应中的 renew_before_days（spec 2.8）
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+	if len(body) > 0 {
+		var cbResp struct {
+			Data struct {
+				RenewBeforeDays int `json:"renew_before_days"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &cbResp) == nil && cbResp.Data.RenewBeforeDays > 0 {
+			c.LastRenewBeforeDays = cbResp.Data.RenewBeforeDays
+		}
 	}
 
 	return nil
@@ -460,11 +532,18 @@ type UpdateRequest struct {
 	ValidationMethod string `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
 }
 
-// UpdateResponse 更新响应（返回完整证书数据）
+// UpdateResponseData 提交 CSR 响应的 data 字段（spec §2.6）
+// 单个 CertData + renew_before_days，与查询/回调接口一致（spec §2.9）
+type UpdateResponseData struct {
+	CertData
+	RenewBeforeDays int `json:"renew_before_days"` // 服务端配置的提前续签天数
+}
+
+// UpdateResponse 更新响应（返回完整证书数据，spec §2.6）
 type UpdateResponse struct {
-	Code int      `json:"code"`
-	Msg  string   `json:"msg"`
-	Data CertData `json:"data"`
+	Code int                `json:"code"`
+	Msg  string             `json:"msg"`
+	Data UpdateResponseData `json:"data"`
 }
 
 // SubmitCSR 提交 CSR 请求签发/重签证书
@@ -512,6 +591,10 @@ func (c *Client) SubmitCSR(ctx context.Context, req *UpdateRequest) (*UpdateResp
 		}
 	}
 
+	if updateResp.Data.RenewBeforeDays > 0 {
+		c.LastRenewBeforeDays = updateResp.Data.RenewBeforeDays
+	}
+
 	return &updateResp, nil
 }
 
@@ -557,6 +640,10 @@ func (c *Client) queryCerts(ctx context.Context, order string) ([]CertData, erro
 		return nil, err
 	}
 
+	if apiResp.Data.RenewBeforeDays > 0 {
+		c.LastRenewBeforeDays = apiResp.Data.RenewBeforeDays
+	}
+
 	return apiResp.Data.Data, nil
 }
 
@@ -585,7 +672,7 @@ func (c *Client) ListAllCerts(ctx context.Context) ([]CertData, error) {
 		default:
 		}
 
-		apiURL := fmt.Sprintf("%s?currentPage=%d&pageSize=%d", c.BaseURL, page, pageSize)
+		apiURL := fmt.Sprintf("%s?page=%d&page_size=%d", c.BaseURL, page, pageSize)
 
 		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
@@ -615,6 +702,10 @@ func (c *Client) ListAllCerts(ctx context.Context) ([]CertData, error) {
 			return nil, err
 		}
 
+		if apiResp.Data.RenewBeforeDays > 0 {
+			c.LastRenewBeforeDays = apiResp.Data.RenewBeforeDays
+		}
+
 		allCerts = append(allCerts, apiResp.Data.Data...)
 		totalPages := (apiResp.Data.Total + pageSize - 1) / pageSize
 		if page >= totalPages {
@@ -636,4 +727,44 @@ func (c *Client) GetCertByOrderID(ctx context.Context, orderID int) (*CertData, 
 		return nil, fmt.Errorf("未找到订单 %d", orderID)
 	}
 	return &certs[0], nil
+}
+
+// ToggleAutoReissue 切换订单的自动续签模式
+// 非关键路径：失败时调用方仅记日志，不中断流程
+func (c *Client) ToggleAutoReissue(ctx context.Context, orderID int, autoReissue bool) error {
+	apiURL := c.BaseURL + "/auto-reissue"
+
+	reqBody := struct {
+		OrderID     int  `json:"order_id"`
+		AutoReissue bool `json:"auto_reissue"`
+	}{
+		OrderID:     orderID,
+		AutoReissue: autoReissue,
+	}
+
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	httpReq, err := http.NewRequest("POST", apiURL, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("创建请求失败: %w", err)
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+c.Token)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.doWithRetry(ctx, httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSize))
+		return handleHTTPError(resp.StatusCode, body)
+	}
+
+	return nil
 }

@@ -130,6 +130,9 @@ func Run(opts Options, progress ProgressFunc) error {
 		// IIS 绑定
 		bindCertToIIS(certData, result.Thumbprint)
 
+		// 通知服务端续签模式：pull 模式启用自动续签
+		toggleAutoReissue(ctx, client, certData.OrderID, false)
+
 		certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 	}
 
@@ -200,15 +203,18 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 	certAPI.SetToken(opts.Token)
 
 	return config.CertConfig{
+		CertName:     fmt.Sprintf("%s-%d", certData.Domain(), certData.OrderID),
 		OrderID:      certData.OrderID,
 		Domain:       certData.Domain(),
 		Domains:      certData.GetDomainList(),
-		ExpiresAt:    certData.ExpiresAt,
-		SerialNumber: serialNumber,
 		Enabled:      true,
 		AutoBindMode: true,
 		BindRules:    []config.BindRule{},
 		API:          certAPI,
+		Metadata: config.CertMetadata{
+			CertExpiresAt: certData.ExpiresAt,
+			CertSerial:    serialNumber,
+		},
 	}
 }
 
@@ -224,7 +230,7 @@ func saveSetupConfig(certConfigs []config.CertConfig) error {
 		if existing != nil {
 			existing.API = newCert.API
 			existing.Domains = newCert.Domains
-			existing.ExpiresAt = newCert.ExpiresAt
+			existing.Metadata.CertExpiresAt = newCert.Metadata.CertExpiresAt
 			existing.Enabled = true
 			existing.AutoBindMode = true
 		} else {
@@ -236,6 +242,17 @@ func saveSetupConfig(certConfigs []config.CertConfig) error {
 	return cfg.Save()
 }
 
+
+// toggleAutoReissue 通知服务端切换自动续签模式，失败仅记日志
+// useLocalKey=false（pull 模式）→ autoReissue=true；useLocalKey=true（local 模式）→ autoReissue=false
+func toggleAutoReissue(ctx context.Context, client *api.Client, orderID int, useLocalKey bool) {
+	autoReissue := !useLocalKey
+	if err := client.ToggleAutoReissue(ctx, orderID, autoReissue); err != nil {
+		log.Printf("警告: 通知服务端续签模式失败 (订单 %d): %v", orderID, err)
+	} else {
+		log.Printf("已通知服务端续签模式 (订单 %d, autoReissue=%v)", orderID, autoReissue)
+	}
+}
 
 // RunCLI 从命令行参数执行 setup（CLI 入口）
 func RunCLI(args []string) error {

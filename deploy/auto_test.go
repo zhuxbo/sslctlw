@@ -80,10 +80,10 @@ func TestCheckDomainConflicts(t *testing.T) {
 func TestSelectBestCertForDomainByIndexes(t *testing.T) {
 	// 设置测试证书
 	allCerts := []config.CertConfig{
-		{OrderID: 100, Domain: "a.com", ExpiresAt: "2024-01-01", Enabled: true},
-		{OrderID: 200, Domain: "b.com", ExpiresAt: "2024-06-01", Enabled: true},
-		{OrderID: 300, Domain: "c.com", ExpiresAt: "2024-03-01", Enabled: true},
-		{OrderID: 400, Domain: "d.com", ExpiresAt: "2024-06-01", Enabled: false}, // 禁用
+		{OrderID: 100, Domain: "a.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-01-01"}, Enabled: true},
+		{OrderID: 200, Domain: "b.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
+		{OrderID: 300, Domain: "c.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-03-01"}, Enabled: true},
+		{OrderID: 400, Domain: "d.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: false}, // 禁用
 	}
 
 	tests := []struct {
@@ -211,17 +211,19 @@ func TestBindRule_Fields(t *testing.T) {
 
 func TestCertConfig_Fields(t *testing.T) {
 	certConfig := config.CertConfig{
-		OrderID:      123,
-		Domain:       "example.com",
-		Domains:      []string{"example.com", "www.example.com"},
-		ExpiresAt:    "2025-12-31",
-		SerialNumber: "ABC123",
-		Enabled:      true,
+		OrderID:   123,
+		Domain:    "example.com",
+		Domains:   []string{"example.com", "www.example.com"},
+		Enabled:   true,
+		RenewMode: "local",
 		BindRules: []config.BindRule{
 			{Domain: "www.example.com", Port: 443},
 		},
-		UseLocalKey:      true,
 		ValidationMethod: "file",
+		Metadata: config.CertMetadata{
+			CertExpiresAt: "2025-12-31",
+			CertSerial:    "ABC123",
+		},
 	}
 
 	if certConfig.OrderID != 123 {
@@ -236,14 +238,20 @@ func TestCertConfig_Fields(t *testing.T) {
 	if len(certConfig.BindRules) != 1 {
 		t.Errorf("CertConfig.BindRules 长度 = %d", len(certConfig.BindRules))
 	}
-	if !certConfig.UseLocalKey {
-		t.Error("CertConfig.UseLocalKey 应该为 true")
+	if certConfig.RenewMode != "local" {
+		t.Errorf("CertConfig.RenewMode = %q, want %q", certConfig.RenewMode, "local")
 	}
 	if certConfig.ValidationMethod != "file" {
 		t.Errorf("CertConfig.ValidationMethod = %q", certConfig.ValidationMethod)
 	}
 	if len(certConfig.Domains) != 2 {
 		t.Errorf("CertConfig.Domains 长度 = %d", len(certConfig.Domains))
+	}
+	if certConfig.Metadata.CertExpiresAt != "2025-12-31" {
+		t.Errorf("CertConfig.Metadata.CertExpiresAt = %q", certConfig.Metadata.CertExpiresAt)
+	}
+	if certConfig.Metadata.CertSerial != "ABC123" {
+		t.Errorf("CertConfig.Metadata.CertSerial = %q", certConfig.Metadata.CertSerial)
 	}
 }
 
@@ -267,8 +275,8 @@ func TestCheckDomainConflicts_AllDisabled(t *testing.T) {
 
 func TestSelectBestCertForDomainByIndexes_AllDisabled(t *testing.T) {
 	certs := []config.CertConfig{
-		{OrderID: 1, Enabled: false, ExpiresAt: "2025-01-01"},
-		{OrderID: 2, Enabled: false, ExpiresAt: "2025-06-01"},
+		{OrderID: 1, Enabled: false, Metadata: config.CertMetadata{CertExpiresAt: "2025-01-01"}},
+		{OrderID: 2, Enabled: false, Metadata: config.CertMetadata{CertExpiresAt: "2025-06-01"}},
 	}
 	result := selectBestCertForDomainByIndexes([]int{0, 1}, certs)
 	if result != nil {
@@ -302,7 +310,7 @@ func TestParseCertExpiry_EdgeCases(t *testing.T) {
 // TestSelectBestCertForDomainByIndexes_InvalidIndexes 测试索引越界
 func TestSelectBestCertForDomainByIndexes_InvalidIndexes(t *testing.T) {
 	certs := []config.CertConfig{
-		{OrderID: 100, Domain: "a.com", ExpiresAt: "2024-06-01", Enabled: true},
+		{OrderID: 100, Domain: "a.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
 	}
 
 	tests := []struct {
@@ -337,8 +345,8 @@ func TestSelectBestCertForDomainByIndexes_InvalidIndexes(t *testing.T) {
 // TestSelectBestCertForDomainByIndexes_NoExpiry 测试没有过期时间的情况
 func TestSelectBestCertForDomainByIndexes_NoExpiry(t *testing.T) {
 	certs := []config.CertConfig{
-		{OrderID: 100, Domain: "a.com", ExpiresAt: "", Enabled: true},
-		{OrderID: 200, Domain: "b.com", ExpiresAt: "", Enabled: true},
+		{OrderID: 100, Domain: "a.com", Metadata: config.CertMetadata{CertExpiresAt: ""}, Enabled: true},
+		{OrderID: 200, Domain: "b.com", Metadata: config.CertMetadata{CertExpiresAt: ""}, Enabled: true},
 	}
 
 	// 当两个都没有过期时间时，选择 OrderID 大的
@@ -353,8 +361,8 @@ func TestSelectBestCertForDomainByIndexes_NoExpiry(t *testing.T) {
 // TestSelectBestCertForDomainByIndexes_MixedExpiry 测试混合过期时间
 func TestSelectBestCertForDomainByIndexes_MixedExpiry(t *testing.T) {
 	certs := []config.CertConfig{
-		{OrderID: 100, Domain: "a.com", ExpiresAt: "", Enabled: true},
-		{OrderID: 200, Domain: "b.com", ExpiresAt: "2024-06-01", Enabled: true},
+		{OrderID: 100, Domain: "a.com", Metadata: config.CertMetadata{CertExpiresAt: ""}, Enabled: true},
+		{OrderID: 200, Domain: "b.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
 	}
 
 	// 有过期时间的优先于没有过期时间的
@@ -369,9 +377,9 @@ func TestSelectBestCertForDomainByIndexes_MixedExpiry(t *testing.T) {
 // TestSelectBestCertForDomainByIndexes_SameExpiryDifferentOrderID 相同过期时间选 OrderID 大的
 func TestSelectBestCertForDomainByIndexes_SameExpiryDifferentOrderID(t *testing.T) {
 	certs := []config.CertConfig{
-		{OrderID: 100, Domain: "a.com", ExpiresAt: "2024-06-01", Enabled: true},
-		{OrderID: 300, Domain: "b.com", ExpiresAt: "2024-06-01", Enabled: true},
-		{OrderID: 200, Domain: "c.com", ExpiresAt: "2024-06-01", Enabled: true},
+		{OrderID: 100, Domain: "a.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
+		{OrderID: 300, Domain: "b.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
+		{OrderID: 200, Domain: "c.com", Metadata: config.CertMetadata{CertExpiresAt: "2024-06-01"}, Enabled: true},
 	}
 
 	got := selectBestCertForDomainByIndexes([]int{0, 1, 2}, certs)

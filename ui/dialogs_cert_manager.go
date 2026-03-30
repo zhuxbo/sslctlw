@@ -74,13 +74,14 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			if !c.Enabled {
 				status = "停用"
 			}
+			isLocal := c.RenewMode == "local"
 			localKey := "否"
 			validation := "-"
-			if c.UseLocalKey {
+			if isLocal {
 				localKey = "是"
 				validation = getValidationDisplay(c.ValidationMethod)
 			}
-			lstCerts.Items.Add(c.Domain, c.ExpiresAt, status, localKey, validation)
+			lstCerts.Items.Add(c.Domain, c.Metadata.CertExpiresAt, status, localKey, validation)
 		}
 	}
 
@@ -108,8 +109,8 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			btnToggle.Hwnd().EnableWindow(true)
 			btnRemove.Hwnd().EnableWindow(true)
 			btnToggleLocalKey.Hwnd().EnableWindow(true)
-			// 只有启用本机提交时才能切换验证方法
-			btnToggleValidation.Hwnd().EnableWindow(cfg.Certificates[selectedIdx].UseLocalKey)
+			// 只有 local 模式时才能切换验证方法
+			btnToggleValidation.Hwnd().EnableWindow(cfg.Certificates[selectedIdx].RenewMode == "local")
 		} else {
 			btnToggle.Hwnd().EnableWindow(false)
 			btnRemove.Hwnd().EnableWindow(false)
@@ -153,10 +154,12 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	// 切换本机提交
 	btnToggleLocalKey.On().BnClicked(func() {
 		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
-			cfg.Certificates[selectedIdx].UseLocalKey = !cfg.Certificates[selectedIdx].UseLocalKey
-			// 关闭本机提交时，清除验证方法
-			if !cfg.Certificates[selectedIdx].UseLocalKey {
-				cfg.Certificates[selectedIdx].ValidationMethod = ""
+			c := &cfg.Certificates[selectedIdx]
+			if c.RenewMode == "local" {
+				c.RenewMode = ""
+				c.ValidationMethod = ""
+			} else {
+				c.RenewMode = "local"
 			}
 			refreshList()
 			if selectedIdx < lstCerts.Items.Count() {
@@ -170,7 +173,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	btnToggleValidation.On().BnClicked(func() {
 		if selectedIdx >= 0 && selectedIdx < len(cfg.Certificates) {
 			cert := &cfg.Certificates[selectedIdx]
-			if !cert.UseLocalKey {
+			if cert.RenewMode != "local" {
 				return
 			}
 

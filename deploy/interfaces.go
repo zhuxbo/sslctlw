@@ -52,7 +52,7 @@ type APIClient interface {
 	Callback(ctx context.Context, req *api.CallbackRequest) error
 }
 
-// OrderStore 订单存储接口
+// OrderStore 订单存储接口（私钥和证书文件操作，metadata 已移入 Config）
 type OrderStore interface {
 	// HasPrivateKey 检查是否有私钥
 	HasPrivateKey(orderID int) bool
@@ -64,10 +64,6 @@ type OrderStore interface {
 	SaveCertificate(orderID int, certPEM, chainPEM string) error
 	// LoadCertificate 加载证书
 	LoadCertificate(orderID int) (certPEM, chainPEM string, err error)
-	// SaveMeta 保存元数据
-	SaveMeta(orderID int, meta *cert.OrderMeta) error
-	// LoadMeta 加载元数据
-	LoadMeta(orderID int) (*cert.OrderMeta, error)
 	// ListOrders 列出所有订单 ID
 	ListOrders() ([]int, error)
 	// DeleteOrder 删除订单

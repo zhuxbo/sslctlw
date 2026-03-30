@@ -110,16 +110,16 @@ func collectProgramInfo(version string) *config.Config {
 			if !c.Enabled {
 				status = "禁用"
 			}
-			mode := "拉取"
-			if c.UseLocalKey {
-				mode = "本地私钥"
+			mode := c.RenewMode
+			if mode == "" {
+				mode = "pull"
 			}
 			api := "无"
 			if c.API.URL != "" {
 				api = "已配置"
 			}
 			fmt.Printf("  #%-2d %-28s 订单:%-8d 过期:%-12s %s  %s  API:%s\n",
-				i+1, c.Domain, c.OrderID, c.ExpiresAt, status, mode, api)
+				i+1, c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, api)
 		}
 	}
 

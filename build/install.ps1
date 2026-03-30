@@ -158,6 +158,7 @@ function Get-TargetVersion {
 
     $channel = ""
     $targetVersion = ""
+    $checksum = ""
 
     if ($RequestedVersion) {
         $targetVersion = Normalize-Version $RequestedVersion
@@ -167,24 +168,46 @@ function Get-TargetVersion {
         else { $channel = "main" }
     } else {
         if (-not $releaseInfo) { return $null }
+        # releases.json 结构: {channel: {latest, versions}} (spec 6.1)
         if ($UseDev) {
-            $targetVersion = $releaseInfo.latest_dev
             $channel = "dev"
         } else {
-            $targetVersion = $releaseInfo.latest_main
             $channel = "main"
-            if (-not $targetVersion) {
-                $targetVersion = $releaseInfo.latest_dev
-                $channel = "dev"
+        }
+        $chData = $releaseInfo.$channel
+        if ($chData -and $chData.latest) {
+            $targetVersion = Normalize-Version $chData.latest
+        }
+        # main 通道无版本时回退到 dev
+        if (-not $targetVersion -and $channel -eq "main") {
+            $channel = "dev"
+            $chData = $releaseInfo.$channel
+            if ($chData -and $chData.latest) {
+                $targetVersion = Normalize-Version $chData.latest
             }
         }
     }
 
     if (-not $targetVersion) { return $null }
 
+    # 从 checksums 获取 SHA256 哈希（spec 8.1: 按文件名查找）
+    if ($releaseInfo -and $releaseInfo.$channel -and $releaseInfo.$channel.versions) {
+        $stripped = $targetVersion.TrimStart("v")
+        $artifactKey = "sslctlw-windows-amd64.exe"
+        foreach ($v in $releaseInfo.$channel.versions) {
+            if ($v.version -eq $stripped) {
+                if ($v.checksums -and $v.checksums.$artifactKey) {
+                    $checksum = $v.checksums.$artifactKey
+                }
+                break
+            }
+        }
+    }
+
     return @{
         Version     = $targetVersion
         Channel     = $channel
+        Checksum    = $checksum
         ReleaseInfo = $releaseInfo
     }
 }
@@ -240,8 +263,8 @@ foreach ($dir in @("logs")) {
     }
 }
 
-$Filename = "sslctlw.exe"
-$ExePath = Join-Path $InstallDir $Filename
+$LocalExeName = "sslctlw.exe"
+$ExePath = Join-Path $InstallDir $LocalExeName
 
 # 获取版本信息
 Write-Info "获取版本信息..."
@@ -273,9 +296,12 @@ if ($CurrentVersion) {
     }
 }
 
+# 产物文件名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
+$ArtifactName = "sslctlw-windows-amd64.exe"
+
 # 下载
-$DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$Filename"
-Write-Info "下载 $Filename..."
+$DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
+Write-Info "下载 $ArtifactName..."
 $downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
 
 # 下载失败时提示输入新的升级域名
@@ -287,12 +313,28 @@ while (-not $downloaded) {
         exit 1
     }
     $ReleaseUrl = Build-ReleaseUrl $newHost
-    $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$Filename"
+    $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
     Write-Info "重试下载: $DownloadUrl"
     $downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
 }
 
-Write-Info "下载完成"
+# SHA256 校验（spec 6.4）
+$ExpectedChecksum = $targetInfo.Checksum
+if ($ExpectedChecksum -and $ExpectedChecksum.StartsWith("sha256:")) {
+    Write-Info "SHA256 校验..."
+    $expectedHash = $ExpectedChecksum.Substring(7)
+    $actualHash = (Get-FileHash -Path $ExePath -Algorithm SHA256).Hash
+    if ($actualHash -ine $expectedHash) {
+        Write-Err "SHA256 校验失败"
+        Write-Err "  期望: $expectedHash"
+        Write-Err "  实际: $actualHash"
+        Remove-Item $ExePath -Force -ErrorAction SilentlyContinue
+        exit 1
+    }
+    Write-Info "SHA256 校验通过"
+} else {
+    Write-Warn "未获取到校验值，跳过 SHA256 校验"
+}
 
 # 写入配置
 $ConfigFile = Join-Path $DataDir "config.json"
@@ -307,6 +349,7 @@ if (Test-Path $ConfigFile) {
     $cfg = @{}
 }
 $cfg | Add-Member -NotePropertyName "release_url" -NotePropertyValue $ReleaseUrl -Force
+$cfg | Add-Member -NotePropertyName "upgrade_channel" -NotePropertyValue $Channel -Force
 $tmpCfg = "$ConfigFile.tmp"
 # PowerShell 5.1 的 -Encoding UTF8 会写 BOM，Go JSON 解析器不支持 BOM
 # 使用 .NET 直接写入 UTF-8 无 BOM
@@ -338,6 +381,9 @@ try {
 } catch {
     Write-Warn "创建桌面快捷方式失败"
 }
+
+# 平台差异：spec §7.2 要求安装脚本注册计划任务，
+# sslctlw 的计划任务由 setup 命令统一注册（需要证书配置后才能创建），安装脚本不提前注册。
 
 Write-Host ""
 Write-Info "安装完成！"
