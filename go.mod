@@ -2,6 +2,8 @@ module sslctlw
 
 go 1.24.0
 
+replace github.com/rodrigocfd/windigo => ./_windigo
+
 require (
 	github.com/rodrigocfd/windigo v0.2.3
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78

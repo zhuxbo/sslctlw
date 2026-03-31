@@ -29,7 +29,7 @@ func main() {
 	if len(os.Args) <= 1 {
 		util.HideConsole()
 		ui.SetVersion(version)
-		ui.RunApp()
+		runGUISafe()
 		return
 	}
 
@@ -42,7 +42,7 @@ func main() {
 			util.HideConsole()
 			ui.EnableDebugMode()
 			ui.SetVersion(version)
-			ui.RunApp()
+			runGUISafe()
 			return
 		}
 	}
@@ -384,4 +384,18 @@ func printUsage() {
   sslctlw uninstall --purge
 
 `, version)
+}
+
+// runGUISafe 带 panic 恢复的 GUI 启动，崩溃信息写入 crash.log
+func runGUISafe() {
+	defer func() {
+		if r := recover(); r != nil {
+			crashPath := filepath.Join(config.GetDataDir(), "crash.log")
+			msg := fmt.Sprintf("GUI panic: %v\n", r)
+			os.WriteFile(crashPath, []byte(msg), 0600)
+			// 也尝试弹 MessageBox 让用户看到
+			util.ShowErrorMessageBox("启动失败", fmt.Sprintf("GUI 初始化失败: %v\n\n详见: %s", r, crashPath))
+		}
+	}()
+	ui.RunApp()
 }
