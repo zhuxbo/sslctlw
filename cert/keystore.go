@@ -16,6 +16,12 @@ import (
 // KeyEncryptionPrefix 私钥加密版本前缀
 const KeyEncryptionPrefix = "v1:dpapi:"
 
+// 文件大小限制（spec 11）
+const (
+	MaxPrivateKeySize = 16 * 1024 // 16KB - 私钥 PEM 大小上限
+	MaxCertChainSize  = 64 * 1024 // 64KB - 证书链（cert + intermediate）大小上限
+)
+
 // EncryptPrivateKey 使用 DPAPI 加密私钥
 func EncryptPrivateKey(keyPEM string) (string, error) {
 	if keyPEM == "" {
@@ -81,6 +87,9 @@ func (s *OrderStore) EnsureOrderDir(orderID int) error {
 
 // SavePrivateKey 保存私钥到订单目录（使用 DPAPI 加密）
 func (s *OrderStore) SavePrivateKey(orderID int, keyPEM string) error {
+	if len(keyPEM) > MaxPrivateKeySize {
+		return fmt.Errorf("私钥大小 %d 超过上限 %d 字节", len(keyPEM), MaxPrivateKeySize)
+	}
 	if err := s.EnsureOrderDir(orderID); err != nil {
 		return fmt.Errorf("创建订单目录失败: %w", err)
 	}

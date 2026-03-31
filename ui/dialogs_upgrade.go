@@ -145,10 +145,6 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 		})
 	})
 
-	// 链式升级路径
-	var upgradePath *upgrade.UpgradePath
-	var needChainUpgrade bool
-
 	// 初始化
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
 		btnUpdate.Hwnd().EnableWindow(false)
@@ -163,44 +159,8 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 				return
 			}
 
-			// 检查是否需要链式升级
-			var chainErr *upgrade.ErrNeedChainUpgrade
-			if err != nil {
-				if e, ok := err.(*upgrade.ErrNeedChainUpgrade); ok {
-					chainErr = e
-				}
-			}
-
 			dlg.UiThread(func() {
 				if dlgCtx.Err() != nil {
-					return
-				}
-
-				// 需要链式升级
-				if chainErr != nil && info != nil {
-					needChainUpgrade = true // 在 UI 线程中设置，避免竞态
-					latestInfo = info
-					lblStatus.Hwnd().SetWindowText(fmt.Sprintf("发现新版本: %s（需要链式升级）", info.Version))
-
-					// 显示链式升级提示
-					notes := fmt.Sprintf("当前版本 %s 需要先升级到中间版本才能升级到 %s\r\n\r\n",
-						chainErr.CurrentVersion, chainErr.TargetVersion)
-					notes += "点击「立即更新」将自动获取升级路径并依次升级。\r\n\r\n"
-					if info.ReleaseNotes != "" {
-						notes += "更新说明:\r\n" + strings.ReplaceAll(info.ReleaseNotes, "\n", "\r\n")
-					}
-					txtNotes.SetText(notes)
-
-					btnUpdate.Hwnd().EnableWindow(true)
-					btnSkip.Hwnd().EnableWindow(true)
-
-					// 更新上次检查时间
-					upgrader.UpdateLastCheck()
-					cfg.LastUpgradeCheck = upgradeCfg.LastCheck
-					if err := cfg.Save(); err != nil {
-						lblStatus.Hwnd().SetWindowText(fmt.Sprintf("保存配置失败: %v", err))
-						logDebug("save config failed after chain upgrade check: %v", err)
-					}
 					return
 				}
 
@@ -219,14 +179,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 				latestInfo = info
 				lblStatus.Hwnd().SetWindowText(fmt.Sprintf("发现新版本: %s", info.Version))
 
-				// 显示更新说明
-				notes := info.ReleaseNotes
-				if notes == "" {
-					notes = "无更新说明"
-				}
-				// 转换换行符
-				notes = strings.ReplaceAll(notes, "\n", "\r\n")
-				txtNotes.SetText(notes)
+				txtNotes.SetText(fmt.Sprintf("新版本 %s 可用，点击「立即更新」开始升级。", info.Version))
 
 				btnUpdate.Hwnd().EnableWindow(true)
 				btnSkip.Hwnd().EnableWindow(true)
@@ -254,60 +207,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 		btnSkip.Hwnd().EnableWindow(false)
 
 		go func() {
-			// 如果已经获取了升级路径（用户确认后第二次点击），直接执行链式升级
-			if upgradePath != nil {
-				dlg.UiThread(func() {
-					executeChainUpgrade(dlg, dlgCtx, upgrader, upgradePath, currentVersion,
-						lblStatus, lblProgress, txtNotes, btnUpdate, btnSkip, btnClose, onComplete)
-				})
-				return
-			}
-
-			// 如果需要链式升级，先获取升级路径
-			if needChainUpgrade {
-				dlg.UiThread(func() {
-					lblStatus.Hwnd().SetWindowText("正在获取升级路径...")
-				})
-
-				path, err := upgrader.GetUpgradePath(dlgCtx, currentVersion, latestInfo.Version)
-
-				if dlgCtx.Err() != nil {
-					return
-				}
-
-				dlg.UiThread(func() {
-					if dlgCtx.Err() != nil {
-						return
-					}
-
-					if err != nil {
-						lblStatus.Hwnd().SetWindowText(fmt.Sprintf("获取升级路径失败: %v", err))
-						txtNotes.SetText(fmt.Sprintf("无法获取升级路径:\r\n%v\r\n\r\n请访问官网手动下载中间版本。", err))
-						btnUpdate.Hwnd().EnableWindow(true)
-						btnSkip.Hwnd().EnableWindow(true)
-						return
-					}
-
-					upgradePath = path
-
-					// 显示升级路径，等待用户确认
-					pathInfo := "升级路径:\r\n"
-					for i, step := range path.Steps {
-						pathInfo += fmt.Sprintf("  %d. %s\r\n", i+1, step.Version)
-					}
-					pathInfo += "\r\n点击「开始升级」以执行链式升级。"
-					txtNotes.SetText(pathInfo)
-					lblStatus.Hwnd().SetWindowText(fmt.Sprintf("需要经过 %d 个版本升级", len(path.Steps)))
-
-					// 修改按钮文本，重新启用，等待用户确认
-					btnUpdate.SetText("开始升级")
-					btnUpdate.Hwnd().EnableWindow(true)
-					btnSkip.Hwnd().EnableWindow(true)
-				})
-				return
-			}
-
-			// 普通升级：下载并验证
+			// 下载并验证
 			path, _, err := upgrader.DownloadAndVerify(dlgCtx, latestInfo)
 
 			if dlgCtx.Err() != nil {
@@ -359,69 +259,6 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 	})
 
 	dlg.ShowModal()
-}
-
-// executeChainUpgrade 执行链式升级
-func executeChainUpgrade(dlg *ui.Modal, ctx context.Context, upgrader *upgrade.Upgrader,
-	path *upgrade.UpgradePath, currentVersion string,
-	lblStatus *ui.Static, lblProgress *ui.Static, txtNotes *ui.Edit,
-	btnUpdate *ui.Button, btnSkip *ui.Button, btnClose *ui.Button,
-	onComplete func()) {
-
-	go func() {
-		// 执行链式升级
-		finalVersion, err := upgrader.ChainUpgrade(ctx, path, func(step upgrade.UpgradeStep, index, total int) bool {
-			// 更新 UI 显示当前步骤
-			dlg.UiThread(func() {
-				lblStatus.Hwnd().SetWindowText(fmt.Sprintf("正在升级到 %s (%d/%d)", step.Version, index, total))
-				if step.ReleaseNotes != "" {
-					txtNotes.SetText(fmt.Sprintf("正在升级到 %s (%d/%d)\r\n\r\n%s",
-						step.Version, index, total,
-						strings.ReplaceAll(step.ReleaseNotes, "\n", "\r\n")))
-				}
-			})
-			return true // 自动确认每一步
-		})
-
-		if ctx.Err() != nil {
-			return
-		}
-
-		dlg.UiThread(func() {
-			if ctx.Err() != nil {
-				return
-			}
-
-			if err != nil {
-				lblStatus.Hwnd().SetWindowText(fmt.Sprintf("链式升级失败: %v", err))
-				if finalVersion != "" {
-					lblProgress.Hwnd().SetWindowText(fmt.Sprintf("已升级到 %s，请重启后继续", finalVersion))
-					btnClose.Hwnd().SetWindowText("重启")
-					btnClose.On().BnClicked(func() {
-						dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
-						upgrade.RestartApplication()
-					})
-				} else {
-					btnUpdate.Hwnd().EnableWindow(true)
-					btnSkip.Hwnd().EnableWindow(true)
-				}
-				return
-			}
-
-			lblStatus.Hwnd().SetWindowText(fmt.Sprintf("链式升级成功！已升级到 %s", finalVersion))
-			lblProgress.Hwnd().SetWindowText("请重启程序以使用新版本")
-			btnClose.Hwnd().SetWindowText("重启")
-
-			btnClose.On().BnClicked(func() {
-				dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
-				upgrade.RestartApplication()
-			})
-
-			if onComplete != nil {
-				onComplete()
-			}
-		})
-	}()
 }
 
 // applyUpdate 应用更新
@@ -548,7 +385,7 @@ func showConfigureReleaseURLDialog(owner ui.Parent, cfg *config.Config) string {
 			defer cancel()
 
 			checker := upgrade.NewGitHubChecker(rawURL)
-			_, err := checker.CheckUpdate(ctx, "stable", "0.0.0")
+			_, err := checker.CheckUpdate(ctx, "main", "0.0.0")
 
 			dlg.UiThread(func() {
 				if err != nil {
@@ -678,7 +515,7 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 	dlg.On().WmCreate(func(_ ui.WmCreate) int {
 		chkAutoCheck.SetCheck(cfg.UpgradeEnabled)
 
-		if cfg.UpgradeChannel == "beta" {
+		if cfg.UpgradeChannel == "dev" {
 			cmbChannel.Items.Select(1)
 		} else {
 			cmbChannel.Items.Select(0)
@@ -693,9 +530,9 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 		cfg.UpgradeEnabled = chkAutoCheck.IsChecked()
 
 		if cmbChannel.Items.Selected() == 1 {
-			cfg.UpgradeChannel = "beta"
+			cfg.UpgradeChannel = "dev"
 		} else {
-			cfg.UpgradeChannel = "stable"
+			cfg.UpgradeChannel = "main"
 		}
 
 		// 解析检查间隔

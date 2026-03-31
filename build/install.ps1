@@ -1,13 +1,16 @@
-# sslctlw Windows 安装脚本
+﻿# sslctlw Windows 安装脚本
 # IIS SSL 证书部署工具
 # 使用方法:
-#   直接执行: .\install.ps1 [-Dev] [-Stable] [-Version <ver>] [-Force] [-Help]
-#   管道模式: irm https://release.example.com/sslctlw/install.ps1 | iex
+#   .\install.ps1 [-ReleaseHost <host>] [-Dev] [-Stable] [-Version <ver>] [-Force] [-Help]
+#
+# 注意: PowerShell 5.1 默认不启用 TLS 1.2，下载脚本前需先执行:
+#   [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 #
 # 服务端要求:
 #   管道模式依赖服务端返回 Content-Type: text/plain; charset=utf-8
 
 param(
+    [string]$ReleaseHost,
     [switch]$Dev,
     [switch]$Stable,
     [string]$Version,
@@ -18,41 +21,102 @@ param(
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
 
+# 强制启用 TLS 1.2（PowerShell 5.1 默认仅 SSL3/TLS 1.0，无法连接现代 HTTPS 服务）
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
+
+# 保存原始控制台编码（StreamWriter 降级时使用，避免 UTF-8 与 GBK 不匹配导致乱码）
+$script:OrigConsoleEncoding = [Console]::OutputEncoding
+
 try {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     [Console]::InputEncoding = [System.Text.Encoding]::UTF8
     $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
 
+# 兼容控制台缓冲区损坏的 Windows 终端（0x1F 错误）
+# 创建底层输出流作为备用，覆盖 Write-Host：每次调用先尝试原生，失败自动降级
+$script:RawOut = try {
+    $w = [System.IO.StreamWriter]::new([Console]::OpenStandardOutput(), $script:OrigConsoleEncoding)
+    $w.AutoFlush = $true; $w
+} catch { $null }
+$script:OrigWriteHost = $ExecutionContext.InvokeCommand.GetCommand('Microsoft.PowerShell.Utility\Write-Host', 'Cmdlet')
+function Write-Host {
+    param([Parameter(Position=0)]$Object = '', $ForegroundColor, $BackgroundColor, [switch]$NoNewline, $Separator)
+    try {
+        $p = @{ Object = $Object }
+        if ($ForegroundColor) { $p.ForegroundColor = $ForegroundColor }
+        if ($NoNewline) { $p.NoNewline = $true }
+        & $script:OrigWriteHost @p
+    } catch {
+        if ($script:RawOut) {
+            $t = if ($Object -ne $null) { $Object.ToString() } else { '' }
+            if ($NoNewline) { $script:RawOut.Write($t) } else { $script:RawOut.WriteLine($t) }
+        }
+    }
+}
+
 function Write-Info { param($msg) Write-Host "[INFO] $msg" -ForegroundColor Green }
 function Write-Warn { param($msg) Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Write-Err { param($msg) Write-Host "[ERROR] $msg" -ForegroundColor Red }
+
+function Write-NetworkError {
+    param([string]$ErrorMessage, [string]$Url)
+
+    if ($ErrorMessage -match "SSL|TLS|SecureChannel|certificate") {
+        Write-Err "TLS 连接失败: $Url"
+        Write-Err "修复方法: 在 PowerShell 中先执行以下命令，然后重试:"
+        Write-Host "  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12" -ForegroundColor Yellow
+    } elseif ($ErrorMessage -match "404|NotFound") {
+        Write-Err "资源不存在: $Url"
+        Write-Err "请检查版本号是否正确"
+    } elseif ($ErrorMessage -match "timeout|timed out") {
+        Write-Err "连接超时: $Url"
+        Write-Err "请检查网络连接或稍后重试"
+    } elseif ($ErrorMessage -match "resolve|DNS|NameResolution") {
+        Write-Err "域名解析失败: $Url"
+        Write-Err "请检查服务器地址是否正确"
+    } else {
+        Write-Err "网络请求失败: $Url"
+        Write-Err "错误: $ErrorMessage"
+    }
+}
+
+# 构建 ReleaseUrl
+function Build-ReleaseUrl {
+    param([string]$Host_)
+    $Host_ = $Host_.TrimEnd("/")
+    if ($Host_ -match "^https?://") { return $Host_ }
+    return "https://$Host_/sslctlw"
+}
 
 if ($Help) {
     Write-Host "sslctlw 安装脚本 - IIS SSL 证书部署工具"
     Write-Host ""
     Write-Host "选项:"
-    Write-Host "  -Dev          安装测试版（dev 通道）"
-    Write-Host "  -Stable       安装稳定版（main 通道，默认）"
-    Write-Host "  -Version VER  安装指定版本"
-    Write-Host "  -Force        强制重新安装"
-    Write-Host "  -Help         显示帮助"
+    Write-Host "  -ReleaseHost HOST  指定服务器（默认 release.cnssl.com）"
+    Write-Host "  -Dev               安装测试版（dev 通道）"
+    Write-Host "  -Stable            安装稳定版（main 通道，默认）"
+    Write-Host "  -Version VER       安装指定版本"
+    Write-Host "  -Force             强制重新安装"
+    Write-Host "  -Help              显示帮助"
     Write-Host ""
     Write-Host "示例:"
-    Write-Host "  .\install.ps1                    # 安装最新稳定版"
-    Write-Host "  .\install.ps1 -Dev               # 安装最新测试版"
-    Write-Host "  .\install.ps1 -Version 1.0.0     # 安装指定版本"
-    Write-Host "  .\install.ps1 -Force             # 强制重新安装"
+    Write-Host "  .\install.ps1                                   # 使用默认服务器安装"
+    Write-Host "  .\install.ps1 -ReleaseHost release.cnssl.com    # 指定服务器安装"
+    Write-Host "  .\install.ps1 -Dev                              # 安装最新测试版"
+    Write-Host "  .\install.ps1 -Version 1.0.0                    # 安装指定版本"
+    Write-Host "  .\install.ps1 -Force                            # 强制重新安装"
     exit 0
 }
 
-# Release 服务器（发布脚本自动替换）
-$ReleaseUrl = "__RELEASE_URL__"
-$ReleaseUrl = $ReleaseUrl.TrimEnd("/")
-
-if (-not $ReleaseUrl.StartsWith("https://")) {
-    Write-Err "安装脚本未正确配置，请从官方渠道下载"
-    exit 1
+# 升级地址（优先参数，回落到内置默认值）
+$FallbackHost = "release.cnssl.com"
+if ($ReleaseHost) {
+    $ReleaseUrl = Build-ReleaseUrl $ReleaseHost
+} else {
+    $ReleaseUrl = Build-ReleaseUrl $FallbackHost
 }
 
 # --- 辅助函数 ---
@@ -84,14 +148,17 @@ function Get-TargetVersion {
     )
 
     $releaseInfo = $null
+    $releaseUrl = "$BaseUrl/releases.json"
     try {
-        $releaseInfo = Invoke-RestMethod -Uri "$BaseUrl/releases.json" -TimeoutSec 30 -ErrorAction Stop
+        $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -TimeoutSec 30 -ErrorAction Stop
     } catch {
+        Write-NetworkError -ErrorMessage $_.Exception.Message -Url $releaseUrl
         if (-not $RequestedVersion) { return $null }
     }
 
     $channel = ""
     $targetVersion = ""
+    $checksum = ""
 
     if ($RequestedVersion) {
         $targetVersion = Normalize-Version $RequestedVersion
@@ -101,25 +168,60 @@ function Get-TargetVersion {
         else { $channel = "main" }
     } else {
         if (-not $releaseInfo) { return $null }
+        # releases.json 结构: {channel: {latest, versions}} (spec 6.1)
         if ($UseDev) {
-            $targetVersion = $releaseInfo.latest_dev
             $channel = "dev"
         } else {
-            $targetVersion = $releaseInfo.latest_main
             $channel = "main"
-            if (-not $targetVersion) {
-                $targetVersion = $releaseInfo.latest_dev
-                $channel = "dev"
+        }
+        $chData = $releaseInfo.$channel
+        if ($chData -and $chData.latest) {
+            $targetVersion = Normalize-Version $chData.latest
+        }
+        # main 通道无版本时回退到 dev
+        if (-not $targetVersion -and $channel -eq "main") {
+            $channel = "dev"
+            $chData = $releaseInfo.$channel
+            if ($chData -and $chData.latest) {
+                $targetVersion = Normalize-Version $chData.latest
             }
         }
     }
 
     if (-not $targetVersion) { return $null }
 
+    # 从 checksums 获取 SHA256 哈希（spec 8.1: 按文件名查找）
+    if ($releaseInfo -and $releaseInfo.$channel -and $releaseInfo.$channel.versions) {
+        $stripped = $targetVersion.TrimStart("v")
+        $artifactKey = "sslctlw-windows-amd64.exe"
+        foreach ($v in $releaseInfo.$channel.versions) {
+            if ($v.version -eq $stripped) {
+                if ($v.checksums -and $v.checksums.$artifactKey) {
+                    $checksum = $v.checksums.$artifactKey
+                }
+                break
+            }
+        }
+    }
+
     return @{
         Version     = $targetVersion
         Channel     = $channel
+        Checksum    = $checksum
         ReleaseInfo = $releaseInfo
+    }
+}
+
+# 下载安装包，失败时提示输入新的升级域名重试
+function Download-Package {
+    param([string]$Url, [string]$OutFile)
+
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 120 -ErrorAction Stop
+        return $true
+    } catch {
+        Write-NetworkError -ErrorMessage $_.Exception.Message -Url $Url
+        return $false
     }
 }
 
@@ -136,15 +238,35 @@ if ($Arch -ne "amd64") {
 try {
     $iisFeature = Get-WindowsOptionalFeature -Online -FeatureName IIS-WebServer -ErrorAction SilentlyContinue
     if (-not $iisFeature -or $iisFeature.State -ne 'Enabled') {
-        Write-Warn "未检测到 IIS，sslctlw 需要 IIS 环境"
+        Write-Err "未检测到 IIS，sslctlw 需要 IIS 环境"
+        Write-Err "请先安装 IIS: Install-WindowsFeature -Name Web-Server"
+        exit 1
     } else {
         Write-Info "检测到 IIS"
     }
 } catch {
-    Write-Warn "IIS 检测失败"
+    Write-Warn "IIS 检测失败，继续安装"
 }
 
-# 获取目标版本
+# 安装目录
+$InstallDir = "C:\sslctlw"
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+}
+
+# 数据目录
+$DataDir = Join-Path $InstallDir "sslctlw"
+foreach ($dir in @("logs")) {
+    $path = Join-Path $DataDir $dir
+    if (-not (Test-Path $path)) {
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+    }
+}
+
+$LocalExeName = "sslctlw.exe"
+$ExePath = Join-Path $InstallDir $LocalExeName
+
+# 获取版本信息
 Write-Info "获取版本信息..."
 $targetInfo = Get-TargetVersion -BaseUrl $ReleaseUrl -RequestedVersion $Version -UseDev:$Dev -UseStable:$Stable
 if (-not $targetInfo) {
@@ -154,7 +276,6 @@ if (-not $targetInfo) {
 
 $TargetVersion = $targetInfo.Version
 $Channel = $targetInfo.Channel
-$releaseInfo = $targetInfo.ReleaseInfo
 
 if ($Channel -eq "dev") {
     Write-Info "目标版本: $TargetVersion (测试版)"
@@ -175,37 +296,47 @@ if ($CurrentVersion) {
     }
 }
 
-# 安装目录
-$InstallDir = "C:\sslctlw"
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-}
-
-# 数据目录
-$DataDir = Join-Path $InstallDir "sslctlw"
-foreach ($dir in @("logs")) {
-    $path = Join-Path $DataDir $dir
-    if (-not (Test-Path $path)) {
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-    }
-}
+# 产物文件名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
+$ArtifactName = "sslctlw-windows-amd64.exe"
 
 # 下载
-$Filename = "sslctlw.exe"
-$ExePath = Join-Path $InstallDir $Filename
-$DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$Filename"
+$DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
+Write-Info "下载 $ArtifactName..."
+$downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
 
-Write-Info "下载 $Filename..."
-try {
-    Invoke-WebRequest -Uri $DownloadUrl -OutFile $ExePath -TimeoutSec 120 -ErrorAction Stop
-} catch {
-    Write-Err "下载失败: $DownloadUrl"
-    exit 1
+# 下载失败时提示输入新的升级域名
+while (-not $downloaded) {
+    Write-Host ""
+    $newHost = Read-Host "请输入新的升级域名（直接回车退出）"
+    if (-not $newHost) {
+        Write-Err "下载失败，安装中止"
+        exit 1
+    }
+    $ReleaseUrl = Build-ReleaseUrl $newHost
+    $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
+    Write-Info "重试下载: $DownloadUrl"
+    $downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
 }
 
-Write-Info "下载完成"
+# SHA256 校验（spec 6.4）
+$ExpectedChecksum = $targetInfo.Checksum
+if ($ExpectedChecksum -and $ExpectedChecksum.StartsWith("sha256:")) {
+    Write-Info "SHA256 校验..."
+    $expectedHash = $ExpectedChecksum.Substring(7)
+    $actualHash = (Get-FileHash -Path $ExePath -Algorithm SHA256).Hash
+    if ($actualHash -ine $expectedHash) {
+        Write-Err "SHA256 校验失败"
+        Write-Err "  期望: $expectedHash"
+        Write-Err "  实际: $actualHash"
+        Remove-Item $ExePath -Force -ErrorAction SilentlyContinue
+        exit 1
+    }
+    Write-Info "SHA256 校验通过"
+} else {
+    Write-Warn "未获取到校验值，跳过 SHA256 校验"
+}
 
-# 写入 release_url 到配置
+# 写入配置
 $ConfigFile = Join-Path $DataDir "config.json"
 if (Test-Path $ConfigFile) {
     try {
@@ -218,8 +349,12 @@ if (Test-Path $ConfigFile) {
     $cfg = @{}
 }
 $cfg | Add-Member -NotePropertyName "release_url" -NotePropertyValue $ReleaseUrl -Force
+$cfg | Add-Member -NotePropertyName "upgrade_channel" -NotePropertyValue $Channel -Force
 $tmpCfg = "$ConfigFile.tmp"
-$cfg | ConvertTo-Json -Depth 10 | Set-Content -Path $tmpCfg -Encoding UTF8
+# PowerShell 5.1 的 -Encoding UTF8 会写 BOM，Go JSON 解析器不支持 BOM
+# 使用 .NET 直接写入 UTF-8 无 BOM
+$json = $cfg | ConvertTo-Json -Depth 10
+[System.IO.File]::WriteAllText($tmpCfg, $json, (New-Object System.Text.UTF8Encoding $false))
 Move-Item -Path $tmpCfg -Destination $ConfigFile -Force
 
 # 添加到 PATH
@@ -246,6 +381,9 @@ try {
 } catch {
     Write-Warn "创建桌面快捷方式失败"
 }
+
+# 平台差异：spec §7.2 要求安装脚本注册计划任务，
+# sslctlw 的计划任务由 setup 命令统一注册（需要证书配置后才能创建），安装脚本不提前注册。
 
 Write-Host ""
 Write-Info "安装完成！"

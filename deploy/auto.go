@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -27,10 +28,9 @@ const (
 
 // Local 模式健壮性常量
 const (
-	maxIssueRetries   = 10                    // CSR 最大重试次数
-	retryResetDays    = 7                     // 重试计数重置间隔（天）
-	processingTimeout = 24 * time.Hour        // processing 状态超时时间
-	timeFormat        = "2006-01-02 15:04:05" // 时间格式
+	maxIssueRetries = 10                    // CSR 最大重试次数
+	maxRenewBatch   = 100                   // 单次续签处理上限
+	timeFormat      = time.RFC3339 // 时间格式（RFC3339）
 )
 
 // Result 部署结果
@@ -50,6 +50,24 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 	if len(cfg.Certificates) == 0 {
 		log.Println("没有配置任何证书")
 		return results
+	}
+
+	// 并发保护：获取文件锁，防止多进程同时续签
+	lockPath := filepath.Join(config.GetDataDir(), "deploy.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err == nil {
+		locked, lockErr := tryLockFile(lockFile)
+		if lockErr != nil {
+			log.Printf("警告: 获取部署锁失败: %v", lockErr)
+		} else if !locked {
+			log.Println("另一个部署进程正在运行，跳过本次检查")
+			lockFile.Close()
+			return results
+		}
+		defer func() {
+			lockFile.Close()
+			os.Remove(lockPath)
+		}()
 	}
 
 	// 检测 IIS 版本
@@ -80,9 +98,14 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 	processedIndex := 0
 
 	// 遍历证书配置
+	processed := 0
 	for i, certCfg := range cfg.Certificates {
 		if !certCfg.Enabled {
 			continue
+		}
+		if processed >= maxRenewBatch {
+			log.Printf("已达单次处理上限 %d，剩余证书下次处理", maxRenewBatch)
+			break
 		}
 
 		// 分散延迟：第一个证书不延迟
@@ -106,17 +129,20 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 			continue
 		}
 
-		log.Printf("检查证书: %s (订单: %d, 本地私钥: %v)", certCfg.Domain, certCfg.OrderID, certCfg.UseLocalKey)
+		isLocal := certCfg.IsLocalMode(cfg.Schedule.RenewMode)
+		log.Printf("检查证书: %s (订单: %d, 模式: %s)", certCfg.Domain, certCfg.OrderID, map[bool]string{true: "local", false: "pull"}[isLocal])
 
 		var certData *api.CertData
 		// 安全警告: privateKey 包含敏感的私钥数据，严禁在日志中打印
 		var privateKey string
 		var err error
 
-		if certCfg.UseLocalKey {
-			// 本机提交：到期前 <= RenewDays 天发起续签
+		if isLocal {
+			// 本机提交：到期前 <= RenewBeforeDays 天发起续签
 			var reason string
-			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.RenewDays)
+			certData, privateKey, reason, err = handleLocalKeyMode(d, client, &cfg.Certificates[i], cfg.Schedule.RenewBeforeDays)
+			// API 调用完成后更新续签提前天数（无论成功或跳过）
+			updateRenewBeforeDays(cfg, client)
 			if err != nil {
 				log.Printf("本机提交处理失败: %v", err)
 				results = append(results, Result{
@@ -134,7 +160,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 				continue
 			}
 		} else {
-			// 自动签发：到期前 <= RenewDays 天开始拉取
+			// 自动签发：到期前 <= RenewBeforeDays 天开始拉取
 			ctx, cancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
 			certData, err = client.GetCertByOrderID(ctx, certCfg.OrderID)
 			cancel()
@@ -149,7 +175,14 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 				continue
 			}
 
+			// API 调用成功，更新服务端返回的续签提前天数
+			updateRenewBeforeDays(cfg, client)
+
 			// 检查证书状态
+			if certData.Status == "processing" {
+				log.Printf("证书 %s 处理中，等待下次检查", certData.Domain())
+				continue
+			}
 			if certData.Status != "active" {
 				log.Printf("证书状态非活跃: %s", certData.Status)
 				results = append(results, Result{
@@ -169,13 +202,38 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 			}
 
 			daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
-			if daysUntilExpiry > cfg.RenewDays {
-				log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.RenewDays)
+			if daysUntilExpiry < 0 {
+				log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+				continue
+			}
+			if daysUntilExpiry > cfg.Schedule.RenewBeforeDays {
+				log.Printf("证书 %s 还有 %d 天过期，未到续签时间（<=%d天后拉取）", certData.Domain(), daysUntilExpiry, cfg.Schedule.RenewBeforeDays)
 				continue
 			}
 
 			log.Printf("证书 %s 将在 %d 天后过期，开始拉取部署...", certData.Domain(), daysUntilExpiry)
 			privateKey = certData.PrivateKey
+		}
+
+		// 安全校验：中间证书非空 + 证书链大小限制
+		if certData.CACert == "" {
+			log.Printf("证书 %s 中间证书为空，跳过部署", certData.Domain())
+			results = append(results, Result{
+				Domain:  certCfg.Domain,
+				Success: false,
+				Message: "中间证书为空，等待下次检查",
+				OrderID: certData.OrderID,
+			})
+			continue
+		}
+		chainSize := len(certData.Certificate) + len(certData.CACert)
+		if chainSize > cert.MaxCertChainSize {
+			log.Printf("证书 %s 证书链大小 %d 超过上限 %d", certData.Domain(), chainSize, cert.MaxCertChainSize)
+			continue
+		}
+		if certData.PrivateKey != "" && len(certData.PrivateKey) > cert.MaxPrivateKeySize {
+			log.Printf("证书 %s 私钥大小 %d 超过上限 %d", certData.Domain(), len(certData.PrivateKey), cert.MaxPrivateKeySize)
+			continue
 		}
 
 		log.Printf("证书 %s 开始部署...", certData.Domain())
@@ -191,8 +249,9 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		}
 		results = append(results, deployResults...)
 
-		// 更新配置中的订单 ID
-		if certCfg.UseLocalKey && certCfg.OrderID != certData.OrderID {
+		// 更新配置中的订单 ID（续费后 API 返回新订单号）
+		if certCfg.OrderID != certData.OrderID {
+			log.Printf("订单号更新: %d -> %d", certCfg.OrderID, certData.OrderID)
 			cfg.Certificates[i].OrderID = certData.OrderID
 		}
 
@@ -200,6 +259,7 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		if hasSuccessResult(deployResults) && certData.Certificate != "" {
 			updateCertDomains(&cfg.Certificates[i], certData.Certificate)
 		}
+		processed++
 	}
 
 	// 更新检查时间
@@ -341,19 +401,8 @@ func validateCertConfig(certCfg *config.CertConfig) error {
 }
 
 // handleProcessingOrder 处理 processing 状态的订单
-// 返回: timedOut（是否超时需要重新提交 CSR）, reason, error
-func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *api.CertData) (timedOut bool, reason string, err error) {
-	// 检查 processing 超时
-	meta, _ := d.Store.LoadMeta(certCfg.OrderID)
-	if meta != nil && meta.CSRSubmittedAt != "" {
-		submittedAt, parseErr := time.Parse(timeFormat, meta.CSRSubmittedAt)
-		if parseErr == nil && time.Since(submittedAt) > processingTimeout {
-			log.Printf("订单 %d CSR 已提交超过 %v 仍在 processing，清除状态准备重新提交", certCfg.OrderID, processingTimeout)
-			d.Store.DeleteOrder(certCfg.OrderID)
-			return true, "", nil
-		}
-	}
-
+// 返回: reason, error
+func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *api.CertData) (reason string, err error) {
 	if certData.File != nil && certData.File.Path != "" {
 		log.Printf("订单 %d 需要文件验证", certCfg.OrderID)
 		if err := handleFileValidation(certCfg.Domain, certData.File); err != nil {
@@ -364,7 +413,7 @@ func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *ap
 	} else {
 		log.Printf("订单 %d 处理中，等待签发", certCfg.OrderID)
 	}
-	return false, "CSR 已提交，等待签发", nil
+	return "CSR 已提交，等待签发", nil
 }
 
 // checkRenewalNeeded 检查证书是否需要续签
@@ -372,10 +421,14 @@ func handleProcessingOrder(d *Deployer, certCfg *config.CertConfig, certData *ap
 func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 	expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt)
 	if err != nil {
-		log.Printf("解析过期时间失败: %v，继续检查私钥", err)
-		return true, "" // 解析失败时继续处理
+		log.Printf("解析过期时间失败: %v，跳过", err)
+		return false, "解析过期时间失败"
 	}
 	daysUntilExpiry := int(time.Until(expiresAt).Hours() / 24)
+	if daysUntilExpiry < 0 {
+		log.Printf("证书 %s 已过期 %d 天，跳过（需人工介入）", certData.Domain(), -daysUntilExpiry)
+		return false, fmt.Sprintf("已过期 %d 天，需人工介入", -daysUntilExpiry)
+	}
 	if daysUntilExpiry > renewDays {
 		log.Printf("证书 %s 还有 %d 天过期，未到续签时间（>%d天）", certData.Domain(), daysUntilExpiry, renewDays)
 		return false, fmt.Sprintf("未到续签时间（还有 %d 天）", daysUntilExpiry)
@@ -386,11 +439,11 @@ func checkRenewalNeeded(certData *api.CertData, renewDays int) (bool, string) {
 
 // tryUseLocalKey 尝试使用本地私钥
 // 返回: 证书数据, 私钥, 是否成功
-func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.CertData, string, bool) {
-	if !d.Store.HasPrivateKey(orderID) {
+func tryUseLocalKey(d *Deployer, certData *api.CertData, certCfg *config.CertConfig) (*api.CertData, string, bool) {
+	if !d.Store.HasPrivateKey(certCfg.OrderID) {
 		return nil, "", false
 	}
-	localKey, err := d.Store.LoadPrivateKey(orderID)
+	localKey, err := d.Store.LoadPrivateKey(certCfg.OrderID)
 	if err != nil {
 		log.Printf("加载本地私钥失败: %v", err)
 		return nil, "", false
@@ -402,46 +455,36 @@ func tryUseLocalKey(d *Deployer, certData *api.CertData, orderID int) (*api.Cert
 	}
 	if !matched {
 		log.Printf("本地私钥与证书不匹配，需要重新生成 CSR")
-		d.Store.DeleteOrder(orderID)
+		d.Store.DeleteOrder(certCfg.OrderID)
 		return nil, "", false
 	}
-	log.Printf("使用本地私钥（订单 %d）", orderID)
-	if err := d.Store.SaveCertificate(orderID, certData.Certificate, certData.CACert); err != nil {
+	log.Printf("使用本地私钥（订单 %d）", certCfg.OrderID)
+	if err := d.Store.SaveCertificate(certCfg.OrderID, certData.Certificate, certData.CACert); err != nil {
 		log.Printf("警告: 保存证书失败: %v", err)
 	}
-	updateOrderMeta(orderID, certData, d.Store)
+	updateCertMetadata(certCfg, certData)
 	return certData, localKey, true
 }
 
 // submitNewCSR 生成并提交新的 CSR
 func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*api.CertData, string, string, error) {
-	// 检查重试计数
-	retryCount := 0
-	meta, _ := d.Store.LoadMeta(certCfg.OrderID)
-	if meta != nil {
-		retryCount = meta.IssueRetryCount
-		if retryCount >= maxIssueRetries {
-			// 检查是否超过重置间隔
-			if meta.CSRSubmittedAt == "" {
-				// 元数据不完整，保守处理：重置计数
-				log.Printf("CSR 重试计数 %d 但提交时间缺失，重置计数", retryCount)
-				retryCount = 0
-			} else {
-				submittedAt, err := time.Parse(timeFormat, meta.CSRSubmittedAt)
-				if err == nil && time.Since(submittedAt) > time.Duration(retryResetDays)*24*time.Hour {
-					log.Printf("CSR 重试计数已达 %d 次，但距上次提交超过 %d 天，重置计数", retryCount, retryResetDays)
-					retryCount = 0
-				} else {
-					return nil, "", "", fmt.Errorf("CSR 重试次数已达上限 (%d)，将在 %d 天后自动重置", maxIssueRetries, retryResetDays)
-				}
-			}
-		}
+	// 检查重试计数（从 config metadata 读取）
+	retryCount := certCfg.Metadata.IssueRetryCount
+	if retryCount >= maxIssueRetries {
+		return nil, "", "", fmt.Errorf("CSR 重试次数已达上限 (%d)，需人工处理", maxIssueRetries)
 	}
 
 	log.Printf("生成新的 CSR (重试: %d/%d)", retryCount, maxIssueRetries)
 	keyPEM, csrPEM, err := cert.GenerateCSR(certCfg.Domain)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("生成 CSR 失败: %w", err)
+	}
+
+	// CSR 哈希去重（spec 5.8）
+	csrHash := fmt.Sprintf("%x", sha256.Sum256([]byte(csrPEM)))
+	if certCfg.Metadata.LastCSRHash == csrHash {
+		log.Printf("CSR 与上次相同，跳过重复提交")
+		return nil, "", "CSR 未变化，等待签发", nil
 	}
 
 	csrReq := &api.UpdateRequest{
@@ -466,18 +509,11 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*a
 	certCfg.OrderID = newOrderID
 	log.Printf("CSR 已提交，订单 ID: %d，状态: %s", newOrderID, csrResp.Data.Status)
 
-	// 记录重试计数和提交时间
-	csrMeta := &cert.OrderMeta{
-		OrderID:         newOrderID,
-		Domain:          certCfg.Domain,
-		Status:          csrResp.Data.Status,
-		CSRSubmittedAt:  time.Now().Format(timeFormat),
-		IssueRetryCount: retryCount + 1,
-		LastIssueState:  csrResp.Data.Status,
-	}
-	if err := d.Store.SaveMeta(newOrderID, csrMeta); err != nil {
-		log.Printf("警告: 保存 CSR 元数据失败: %v", err)
-	}
+	// 更新 metadata：记录重试计数、提交时间和 CSR 哈希
+	certCfg.Metadata.CSRSubmittedAt = time.Now().Format(timeFormat)
+	certCfg.Metadata.IssueRetryCount = retryCount + 1
+	certCfg.Metadata.LastIssueState = csrResp.Data.Status
+	certCfg.Metadata.LastCSRHash = csrHash
 
 	if csrResp.Data.Status == "active" {
 		queryCtx, queryCancel := context.WithTimeout(context.Background(), api.APIQueryTimeout)
@@ -487,7 +523,7 @@ func submitNewCSR(d *Deployer, client APIClient, certCfg *config.CertConfig) (*a
 			if err := d.Store.SaveCertificate(newOrderID, certData.Certificate, certData.CACert); err != nil {
 				log.Printf("警告: 保存证书失败: %v", err)
 			}
-			updateOrderMeta(newOrderID, certData, d.Store)
+			updateCertMetadata(certCfg, certData)
 			return certData, keyPEM, "", nil
 		}
 	}
@@ -514,14 +550,19 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			// API 请求失败时返回错误，不要静默提交新 CSR（防止重复生成订单）
 			return nil, "", "", fmt.Errorf("获取订单 %d 证书失败: %w", certCfg.OrderID, err)
 		} else if certData.Status == "processing" {
-			timedOut, reason, handleErr := handleProcessingOrder(d, certCfg, certData)
+			// 证书已过期则停止，等待人工处理
+			if certData.ExpiresAt != "" {
+				if expiresAt, err := time.Parse("2006-01-02", certData.ExpiresAt); err == nil {
+					if time.Now().After(expiresAt) {
+						return nil, "", "", fmt.Errorf("证书已过期，processing 状态下停止续签，需人工处理")
+					}
+				}
+			}
+			reason, handleErr := handleProcessingOrder(d, certCfg, certData)
 			if handleErr != nil {
 				return nil, "", "", handleErr
 			}
-			if !timedOut {
-				return nil, "", reason, nil
-			}
-			// 超时，fall through 到提交新 CSR
+			return nil, "", reason, nil
 		} else if certData.Status == "active" {
 			// 证书已签发，清理之前可能残留的验证文件
 			cleanupValidationFiles(certCfg.Domain)
@@ -533,7 +574,7 @@ func handleLocalKeyMode(d *Deployer, client APIClient, certCfg *config.CertConfi
 			}
 
 			// 尝试使用本地私钥
-			if cd, pk, ok := tryUseLocalKey(d, certData, certCfg.OrderID); ok {
+			if cd, pk, ok := tryUseLocalKey(d, certData, certCfg); ok {
 				return cd, pk, "", nil
 			}
 
@@ -591,7 +632,7 @@ func selectBestCertForDomainByIndexes(indexes []int, allCerts []config.CertConfi
 			continue
 		}
 
-		candExpiry, candHasExpiry := parseCertExpiry(cand.ExpiresAt)
+		candExpiry, candHasExpiry := parseCertExpiry(cand.Metadata.CertExpiresAt)
 		if best == nil {
 			best = cand
 			bestExpiry = candExpiry
@@ -632,41 +673,31 @@ func parseCertExpiry(value string) (time.Time, bool) {
 	return parsed, true
 }
 
-func updateOrderMeta(orderID int, certData *api.CertData, store OrderStore) {
-	meta := &cert.OrderMeta{
-		OrderID:         orderID,
-		Domain:          certData.Domain(),
-		Domains:         certData.GetDomainList(),
-		Status:          certData.Status,
-		ExpiresAt:       certData.ExpiresAt,
-		CreatedAt:       certData.IssuedAt,
-		LastDeployed:    time.Now().Format(timeFormat),
-		IssueRetryCount: 0,  // 签发成功，重置重试计数
-		LastIssueState:  "",
-		CSRSubmittedAt:  "",
-	}
-	if err := store.SaveMeta(orderID, meta); err != nil {
-		log.Printf("保存订单元数据失败: %v", err)
-	}
+// updateCertMetadata 部署成功后更新证书元数据（清零 CSR 状态）
+func updateCertMetadata(certCfg *config.CertConfig, certData *api.CertData) {
+	certCfg.Metadata.CertExpiresAt = certData.ExpiresAt
+	certCfg.Metadata.LastDeployAt = time.Now().Format(timeFormat)
+	certCfg.Metadata.CertSerial = "" // 由安装后通过 thumbprint 获取
+	certCfg.Metadata.IssueRetryCount = 0
+	certCfg.Metadata.LastIssueState = ""
+	certCfg.Metadata.CSRSubmittedAt = ""
+	certCfg.Metadata.LastCSRHash = ""
 }
 
 // calcSpreadDelay 根据证书数量计算分散延迟区间（秒）
+// spec: per-cert = clamp(600/N, 5, 120)
 func calcSpreadDelay(count int) (sMin, sMax int) {
 	if count <= 1 {
 		return 0, 0
 	}
-	gaps := count - 1
-	sMax = spreadTotalMax / gaps
+	sMax = spreadTotalMax / count
 	if sMax > spreadMax {
 		sMax = spreadMax
 	}
 	if sMax < spreadMin {
 		sMax = spreadMin
 	}
-	sMin = sMax / 4
-	if sMin < spreadMin {
-		sMin = spreadMin
-	}
+	sMin = spreadMin
 	return sMin, sMax
 }
 
@@ -711,7 +742,7 @@ func sendCallback(d *Deployer, client APIClient, orderID int, domain string, suc
 		req := &api.CallbackRequest{
 			OrderID:    orderID,
 			Status:     status,
-			DeployedAt: time.Now().Format("2006-01-02 15:04:05"),
+			DeployedAt: time.Now().Format(timeFormat),
 		}
 
 		if err := client.Callback(ctx, req); err != nil {
@@ -981,4 +1012,17 @@ func cleanupValidationFiles(domain string) {
 // removeTempFile 清理临时文件（带重试）
 func removeTempFile(path string) {
 	util.CleanupTempFileSync(path)
+}
+
+// updateRenewBeforeDays 如果 API Client 返回了 renew_before_days，更新配置
+func updateRenewBeforeDays(cfg *config.Config, client APIClient) {
+	apiClient, ok := client.(*api.Client)
+	if !ok {
+		return
+	}
+	days := apiClient.LastRenewBeforeDays
+	if days > 0 && days != cfg.Schedule.RenewBeforeDays {
+		log.Printf("根据服务端配置更新续签提前天数: %d -> %d", cfg.Schedule.RenewBeforeDays, days)
+		cfg.Schedule.RenewBeforeDays = days
+	}
 }

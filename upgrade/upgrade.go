@@ -2,9 +2,12 @@ package upgrade
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -57,19 +60,7 @@ func (u *Upgrader) GetLatestInfo() *ReleaseInfo {
 	return u.latestInfo
 }
 
-// ErrNeedChainUpgrade 需要链式升级的错误
-type ErrNeedChainUpgrade struct {
-	CurrentVersion string
-	TargetVersion  string
-	MinVersion     string
-}
-
-func (e *ErrNeedChainUpgrade) Error() string {
-	return fmt.Sprintf("当前版本 %s 低于最低要求 %s，需要链式升级到 %s", e.CurrentVersion, e.MinVersion, e.TargetVersion)
-}
-
 // CheckForUpdate 检查更新
-// 如果需要链式升级，返回 ErrNeedChainUpgrade 错误
 func (u *Upgrader) CheckForUpdate(ctx context.Context, currentVersion string) (*ReleaseInfo, error) {
 	u.updateProgress(StatusChecking, "正在检查更新...", 0, 0, 0)
 
@@ -94,134 +85,12 @@ func (u *Upgrader) CheckForUpdate(ctx context.Context, currentVersion string) (*
 		return nil, nil
 	}
 
-	// 检查最低版本要求（不可跳过版本）
-	if info.MinVersion != "" && CompareVersion(currentVersion, info.MinVersion) < 0 {
-		u.updateProgress(StatusAvailable,
-			fmt.Sprintf("发现新版本 %s（需要链式升级）", info.Version), 0, 0, 0)
-		return info, &ErrNeedChainUpgrade{
-			CurrentVersion: currentVersion,
-			TargetVersion:  info.Version,
-			MinVersion:     info.MinVersion,
-		}
-	}
-
 	u.mu.Lock()
 	u.progress.NewVersion = info.Version
 	u.mu.Unlock()
 	u.updateProgress(StatusAvailable, fmt.Sprintf("发现新版本 %s", info.Version), 0, 0, 0)
 
 	return info, nil
-}
-
-// GetUpgradePath 获取升级路径
-func (u *Upgrader) GetUpgradePath(ctx context.Context, currentVersion, targetVersion string) (*UpgradePath, error) {
-	u.updateProgress(StatusChecking, "正在获取升级路径...", 0, 0, 0)
-
-	path, err := u.Checker.GetUpgradePath(ctx, currentVersion, targetVersion)
-	if err != nil {
-		u.updateProgress(StatusFailed, fmt.Sprintf("获取升级路径失败: %v", err), 0, 0, 0)
-		return nil, err
-	}
-
-	if path == nil || len(path.Steps) == 0 {
-		u.updateProgress(StatusFailed, "服务端未返回升级路径", 0, 0, 0)
-		return nil, fmt.Errorf("服务端未返回升级路径，请访问官网手动下载")
-	}
-
-	u.updateProgress(StatusAvailable, fmt.Sprintf("需要经过 %d 个版本升级", len(path.Steps)), 0, 0, 0)
-	return path, nil
-}
-
-// ChainUpgrade 执行链式升级
-// confirmFn: 每个步骤前的确认回调，返回 false 取消升级
-// 返回最终版本号
-func (u *Upgrader) ChainUpgrade(ctx context.Context, path *UpgradePath, confirmFn func(step UpgradeStep, index, total int) bool) (string, error) {
-	if path == nil || len(path.Steps) == 0 {
-		return "", fmt.Errorf("升级路径为空")
-	}
-
-	total := len(path.Steps)
-	var lastVersion string
-
-	for i, step := range path.Steps {
-		// 确认回调
-		if confirmFn != nil && !confirmFn(step, i+1, total) {
-			u.updateProgress(StatusIdle, "用户取消升级", 0, 0, 0)
-			return lastVersion, fmt.Errorf("用户取消升级")
-		}
-
-		u.updateProgress(StatusDownloading,
-			fmt.Sprintf("正在升级到 %s (%d/%d)...", step.Version, i+1, total), 0, 0, 0)
-
-		// 下载
-		tempPath, err := u.downloadStep(ctx, step)
-		if err != nil {
-			return lastVersion, fmt.Errorf("下载版本 %s 失败: %w", step.Version, err)
-		}
-
-		// 验证
-		u.updateProgress(StatusVerifying,
-			fmt.Sprintf("正在验证 %s (%d/%d)...", step.Version, i+1, total), 0, 0, 0)
-
-		verifyResult, err := u.Verifier.Verify(tempPath, u.Config.GetVerifyConfig())
-		if err != nil {
-			os.Remove(tempPath)
-			return lastVersion, fmt.Errorf("验证版本 %s 失败: %w", step.Version, err)
-		}
-
-		if !verifyResult.Valid {
-			os.Remove(tempPath)
-			return lastVersion, fmt.Errorf("版本 %s 签名无效: %s", step.Version, verifyResult.Message)
-		}
-
-		// 应用
-		u.updateProgress(StatusApplying,
-			fmt.Sprintf("正在应用 %s (%d/%d)...", step.Version, i+1, total), 0, 0, 0)
-
-		if err := u.ApplyUpdate(ctx, tempPath, step.Version); err != nil {
-			return lastVersion, fmt.Errorf("应用版本 %s 失败: %w", step.Version, err)
-		}
-
-		lastVersion = step.Version
-
-		// 如果不是最后一步，需要重启后继续
-		if i < total-1 {
-			u.updateProgress(StatusSuccess,
-				fmt.Sprintf("已升级到 %s，重启后将继续升级到下一版本", step.Version), 0, 0, 0)
-			// 链式升级每一步都需要重启，返回当前版本让调用方处理
-			return lastVersion, nil
-		}
-	}
-
-	u.updateProgress(StatusSuccess, fmt.Sprintf("链式升级完成，已升级到 %s", lastVersion), 0, 0, 0)
-	return lastVersion, nil
-}
-
-// downloadStep 下载单个升级步骤
-func (u *Upgrader) downloadStep(ctx context.Context, step UpgradeStep) (string, error) {
-	tempDir, err := os.MkdirTemp("", "sslctlw-upgrade-*")
-	if err != nil {
-		return "", fmt.Errorf("创建临时目录失败: %w", err)
-	}
-
-	tempPath := filepath.Join(tempDir, fmt.Sprintf("sslctlw-%s.exe", step.Version))
-
-	err = u.Downloader.Download(ctx, step.DownloadURL, tempPath, func(downloaded, total int64, speed float64) {
-		percent := float64(0)
-		if total > 0 {
-			percent = float64(downloaded) / float64(total) * 100
-		}
-		u.updateProgress(StatusDownloading,
-			fmt.Sprintf("正在下载 %s... %.1f%%", step.Version, percent),
-			downloaded, total, speed)
-	})
-
-	if err != nil {
-		os.RemoveAll(tempDir)
-		return "", err
-	}
-
-	return tempPath, nil
 }
 
 // DownloadAndVerify 下载并验证更新
@@ -252,6 +121,18 @@ func (u *Upgrader) DownloadAndVerify(ctx context.Context, info *ReleaseInfo) (st
 		os.RemoveAll(tempDir)
 		u.updateProgress(StatusFailed, fmt.Sprintf("下载失败: %v", err), 0, 0, 0)
 		return "", nil, err
+	}
+
+	// SHA256 校验（spec 6.4：校验必过）
+	if info.Checksum == "" {
+		os.RemoveAll(tempDir)
+		u.updateProgress(StatusFailed, "SHA256 校验值缺失", 0, 0, 0)
+		return "", nil, fmt.Errorf("SHA256 校验值缺失，拒绝安装")
+	}
+	if err := verifySHA256(tempPath, info.Checksum); err != nil {
+		os.RemoveAll(tempDir)
+		u.updateProgress(StatusFailed, fmt.Sprintf("SHA256 校验失败: %v", err), 0, 0, 0)
+		return "", nil, fmt.Errorf("SHA256 校验失败: %w", err)
 	}
 
 	// 验证签名
@@ -384,6 +265,28 @@ func (u *Upgrader) updateProgress(status UpdateStatus, message string, downloade
 	if onProgress != nil {
 		onProgress(progress)
 	}
+}
+
+// verifySHA256 校验文件的 SHA256 哈���值
+// expected 格式: "sha256:hex_digest"
+func verifySHA256(filePath, expected string) error {
+	expectedHash, ok := strings.CutPrefix(expected, "sha256:")
+	if !ok {
+		return fmt.Errorf("校验值格式无效，应为 sha256:hex")
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("读取文件失败: %w", err)
+	}
+
+	actual := sha256.Sum256(data)
+	actualHex := hex.EncodeToString(actual[:])
+
+	if !strings.EqualFold(actualHex, expectedHash) {
+		return fmt.Errorf("哈希不匹配: 期望 %s，实际 %s", expectedHash, actualHex)
+	}
+	return nil
 }
 
 // FormatSpeed 格式化下载速度

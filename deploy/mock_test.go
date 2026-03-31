@@ -68,8 +68,6 @@ type MockOrderStore struct {
 	SavePrivateKeyFunc  func(orderID int, keyPEM string) error
 	SaveCertificateFunc func(orderID int, certPEM, chainPEM string) error
 	LoadCertificateFunc func(orderID int) (certPEM, chainPEM string, err error)
-	SaveMetaFunc        func(orderID int, meta *cert.OrderMeta) error
-	LoadMetaFunc        func(orderID int) (*cert.OrderMeta, error)
 	ListOrdersFunc      func() ([]int, error)
 	DeleteOrderFunc     func(orderID int) error
 }
@@ -109,20 +107,6 @@ func (m *MockOrderStore) LoadCertificate(orderID int) (certPEM, chainPEM string,
 	return "", "", nil
 }
 
-func (m *MockOrderStore) SaveMeta(orderID int, meta *cert.OrderMeta) error {
-	if m.SaveMetaFunc != nil {
-		return m.SaveMetaFunc(orderID, meta)
-	}
-	return nil
-}
-
-func (m *MockOrderStore) LoadMeta(orderID int) (*cert.OrderMeta, error) {
-	if m.LoadMetaFunc != nil {
-		return m.LoadMetaFunc(orderID)
-	}
-	return nil, nil
-}
-
 func (m *MockOrderStore) ListOrders() ([]int, error) {
 	if m.ListOrdersFunc != nil {
 		return m.ListOrdersFunc()
@@ -153,11 +137,10 @@ func makeTestCertData(orderID int, domain, status, expiresAt string) *api.CertDa
 // 测试用的配置数据
 func makeTestCertConfig(orderID int, domain string, enabled bool) config.CertConfig {
 	return config.CertConfig{
-		OrderID:    orderID,
-		Domain:     domain,
-		Domains:    []string{domain},
-		Enabled:    enabled,
-		UseLocalKey: false,
+		OrderID: orderID,
+		Domain:  domain,
+		Domains: []string{domain},
+		Enabled: enabled,
 		BindRules: []config.BindRule{
 			{Domain: domain, Port: 443},
 		},

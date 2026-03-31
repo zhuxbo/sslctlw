@@ -29,7 +29,7 @@ func main() {
 	if len(os.Args) <= 1 {
 		util.HideConsole()
 		ui.SetVersion(version)
-		ui.RunApp()
+		runGUISafe()
 		return
 	}
 
@@ -42,7 +42,7 @@ func main() {
 			util.HideConsole()
 			ui.EnableDebugMode()
 			ui.SetVersion(version)
-			ui.RunApp()
+			runGUISafe()
 			return
 		}
 	}
@@ -176,7 +176,7 @@ func deploySingleCert(orderID int) error {
 	// 创建单证书配置进行部署
 	singleCfg := &config.Config{
 		Certificates: []config.CertConfig{*certCfg},
-		RenewDays:    cfg.RenewDays,
+		Schedule:     cfg.Schedule,
 	}
 	_ = client // client 由 AutoDeploy 内部通过 NewClientForCert 创建
 	results := deploy.AutoDeploy(singleCfg, deployer, false)
@@ -214,16 +214,16 @@ func runStatus() {
 		if c.Enabled {
 			status = "启用"
 		}
-		mode := "拉取"
-		if c.UseLocalKey {
-			mode = "本地私钥"
+		mode := c.RenewMode
+		if mode == "" {
+			mode = "pull"
 		}
 		hasAPI := "无"
 		if c.API.URL != "" {
 			hasAPI = "已配置"
 		}
 		fmt.Printf("  %-30s 订单:%-8d 过期:%s 状态:%s 模式:%s API:%s\n",
-			c.Domain, c.OrderID, c.ExpiresAt, status, mode, hasAPI)
+			c.Domain, c.OrderID, c.Metadata.CertExpiresAt, status, mode, hasAPI)
 	}
 
 	// 计划任务状态
@@ -384,4 +384,18 @@ func printUsage() {
   sslctlw uninstall --purge
 
 `, version)
+}
+
+// runGUISafe 带 panic 恢复的 GUI 启动，崩溃信息写入 crash.log
+func runGUISafe() {
+	defer func() {
+		if r := recover(); r != nil {
+			crashPath := filepath.Join(config.GetDataDir(), "crash.log")
+			msg := fmt.Sprintf("GUI panic: %v\n", r)
+			os.WriteFile(crashPath, []byte(msg), 0600)
+			// 也尝试弹 MessageBox 让用户看到
+			util.ShowErrorMessageBox("启动失败", fmt.Sprintf("GUI 初始化失败: %v\n\n详见: %s", r, crashPath))
+		}
+	}()
+	ui.RunApp()
 }

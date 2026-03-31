@@ -5,6 +5,8 @@ IIS SSL 证书部署工具，Go + windigo，单文件 exe（Console 子系统）
 支持 CLI 和 GUI 两种模式：无参数运行打开 GUI，有子命令进入 CLI。
 
 > **维护指引**：保持本文件精简，仅包含项目概览和快速参考。详细规范写入 `skills/` 目录。
+>
+> **统一规范**：跨项目共通行为规范见 `deploy-spec.md`
 
 ## 核心指令
 
@@ -33,7 +35,7 @@ cert/         # 证书存储/安装/转换/CSR/证书链检查与修复
 api/          # Deploy API 客户端
 config/       # JSON 配置（DPAPI 加密，API 配置在证书级）
 deploy/       # 自动部署逻辑（per-cert client）
-upgrade/      # 在线升级（签名验证/链式升级）
+upgrade/      # 在线升级（签名验证）
 util/         # 工具函数（含 console_windows.go）
 build/        # 构建/发布/安装脚本
 integration/  # 端到端集成测试
@@ -45,7 +47,7 @@ integration/  # 端到端集成测试
 - **per-cert client** - deploy 层遍历证书时为每个证书创建独立的 API Client
 - **分散延迟** - CLI `deploy --all` 启用分散延迟（总上限 600s），GUI 不延迟
 - **域名提取** - 部署成功后从证书 PEM 提取 CN+SAN 更新配置，回退到 API 数据
-- **Local 模式健壮性** - CSR 重试上限 10 次、processing 超时 24h、7 天自动重置
+- **Local 模式健壮性** - CSR 重试上限 10 次（spec §3.2），processing 状态按 spec §3.5 处理
 - **Console 子系统** - 构建为 Console 应用，GUI 模式通过 `util.HideConsole()` 隐藏控制台
 - **setup 共享** - `setup/` 包的 `Run()` 被 CLI 和 GUI 共用，通过 `ProgressFunc` 回调输出进度
 

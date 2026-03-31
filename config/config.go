@@ -17,8 +17,8 @@ const (
 	// DataDirName 数据目录名称
 	DataDirName = "sslctlw"
 
-	// DefaultRenewDays 提前续签天数（两种模式统一）
-	DefaultRenewDays = 13
+	// DefaultRenewBeforeDays 提前续签天数（两种模式统一）
+	DefaultRenewBeforeDays = 14
 
 	// DefaultTaskName 默认任务计划名称
 	DefaultTaskName = "SSLCtlW"
@@ -35,9 +35,11 @@ type BindRule struct {
 }
 
 // CertAPIConfig 证书级 API 配置
+// 平台差异：spec §1.4 定义公共字段为 url + token（明文），
+// Windows 平台使用 DPAPI 加密存储为 encrypted_token，属于 spec §1.6 允许的安全增强扩展。
 type CertAPIConfig struct {
 	URL            string `json:"url"`                       // 部署接口地址
-	EncryptedToken string `json:"encrypted_token,omitempty"` // DPAPI 加密后的 Token
+	EncryptedToken string `json:"encrypted_token,omitempty"` // DPAPI 加密后的 Token（平台扩展，替代 spec 的明文 token）
 }
 
 // GetToken 获取解密后的 Token
@@ -60,25 +62,54 @@ func (c *CertAPIConfig) SetToken(token string) error {
 	return nil
 }
 
-// CertConfig 证书配置（以证书为维度）
+// CertMetadata 证书元数据（spec 1.5）
+type CertMetadata struct {
+	LastDeployAt    string `json:"last_deploy_at,omitempty"`    // 最后部署时间
+	CertExpiresAt   string `json:"cert_expires_at,omitempty"`   // 证书过期时间
+	CertSerial      string `json:"cert_serial,omitempty"`       // 证书序列号
+	CSRSubmittedAt  string `json:"csr_submitted_at,omitempty"`  // CSR 提交时间（仅 local 模式）
+	LastCSRHash     string `json:"last_csr_hash,omitempty"`     // 上次 CSR 的 SHA256 哈希
+	LastIssueState  string `json:"last_issue_state,omitempty"`  // 签发状态
+	IssueRetryCount int    `json:"issue_retry_count,omitempty"` // CSR 提交重试计数
+	// 平台扩展（IIS）
+	Thumbprint string `json:"thumbprint,omitempty"` // 证书指纹
+}
+
+// CertConfig 证书配置（以证书为维度，spec 1.3）
 type CertConfig struct {
+	CertName         string        `json:"cert_name"`                   // 证书名称（如 example.com-12345）
 	OrderID          int           `json:"order_id"`                    // 证书订单 ID
-	Domain           string        `json:"domain"`                      // 主域名（显示用）
-	Domains          []string      `json:"domains"`                     // 证书包含的所有域名
-	ExpiresAt        string        `json:"expires_at"`                  // 过期时间
-	SerialNumber     string        `json:"serial_number"`               // 证书序列号
 	Enabled          bool          `json:"enabled"`                     // 是否启用自动部署
-	BindRules        []BindRule    `json:"bind_rules,omitempty"`        // 绑定规则
-	UseLocalKey      bool          `json:"use_local_key"`               // 使用本机提交模式
+	Domain           string        `json:"domain"`                      // 主域名（IIS 显示用，平台扩展）
+	Domains          []string      `json:"domains"`                     // 证书包含的所有域名
+	RenewMode        string        `json:"renew_mode,omitempty"`        // 证书级续签模式，空串继承全局
 	ValidationMethod string        `json:"validation_method,omitempty"` // 验证方法: file 或 delegation
-	AutoBindMode     bool          `json:"auto_bind_mode"`              // 自动绑定模式（按已有绑定更换证书）
 	API              CertAPIConfig `json:"api"`                         // 证书级 API 配置
+	Metadata         CertMetadata  `json:"metadata"`                    // 证书元数据
+	// 平台扩展（IIS）
+	BindRules    []BindRule `json:"bind_rules,omitempty"` // 绑定规则
+	AutoBindMode bool       `json:"auto_bind_mode"`       // 自动绑定模式（按已有绑定更换证书）
+}
+
+// IsLocalMode 判断证书是否使用 local 模式（检查证书级 renew_mode，回退到全局）
+func (c *CertConfig) IsLocalMode(globalMode string) bool {
+	mode := c.RenewMode
+	if mode == "" {
+		mode = globalMode
+	}
+	return mode == "local"
+}
+
+// Schedule 续签调度配置
+type Schedule struct {
+	RenewMode       string `json:"renew_mode"`        // 续签模式（默认 "pull"）
+	RenewBeforeDays int    `json:"renew_before_days"` // 提前续签天数（默认 14）
 }
 
 // Config 应用配置
 type Config struct {
 	Certificates     []CertConfig `json:"certificates"`              // 证书配置
-	RenewDays        int          `json:"renew_days"`                // 提前续签天数（默认13）
+	Schedule         Schedule     `json:"schedule"`                  // 续签调度配置
 	LastCheck        string       `json:"last_check"`                // 上次检查时间
 	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
 	TaskName         string       `json:"task_name"`                 // 任务计划名称
@@ -86,7 +117,7 @@ type Config struct {
 
 	// 升级配置
 	UpgradeEnabled   bool   `json:"upgrade_enabled"`     // 启用自动检查更新，默认 true
-	UpgradeChannel   string `json:"upgrade_channel"`     // 版本通道: stable | beta，默认 stable
+	UpgradeChannel   string `json:"upgrade_channel"`     // 版本通道: main | dev，默认 main
 	UpgradeInterval  int    `json:"upgrade_interval"`    // 升级检查间隔（小时），默认 24
 	LastUpgradeCheck string `json:"last_upgrade_check"`  // 上次升级检查时间
 	SkippedVersion   string `json:"skipped_version"`     // 用户跳过的版本
@@ -96,14 +127,17 @@ type Config struct {
 // DefaultConfig 默认配置
 func DefaultConfig() *Config {
 	return &Config{
-		Certificates:     []CertConfig{},
-		RenewDays:        DefaultRenewDays,
+		Certificates: []CertConfig{},
+		Schedule: Schedule{
+			RenewMode:       "pull",
+			RenewBeforeDays: DefaultRenewBeforeDays,
+		},
 		AutoCheckEnabled: false,
 		TaskName:         DefaultTaskName,
 		IIS7Mode:         false,
 		// 升级配置默认值
 		UpgradeEnabled:  true,
-		UpgradeChannel:  "stable",
+		UpgradeChannel:  "main",
 		UpgradeInterval: DefaultUpgradeCheckInterval,
 		ReleaseURL:      "",
 	}
@@ -154,9 +188,10 @@ func GetLogDir() string {
 }
 
 // Load 加载配置（线程安全）
+// 执行完整迁移流程：合并旧文件 → 规则迁移 → 递归补齐默认值 → 持久化
 func Load() (*Config, error) {
-	configMu.RLock()
-	defer configMu.RUnlock()
+	configMu.Lock()
+	defer configMu.Unlock()
 
 	path := GetConfigPath()
 
@@ -168,24 +203,60 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
 	}
 
-	if cfg.RenewDays == 0 {
-		cfg.RenewDays = DefaultRenewDays
-	}
-	if cfg.TaskName == "" {
-		cfg.TaskName = DefaultTaskName
+	changed := false
+	var toDelete []string
+
+	// 步骤 2: 合并旧文件（如有）
+	configDir := filepath.Dir(path)
+	for _, mf := range mergeFiles {
+		oldPath := filepath.Join(configDir, mf.name)
+		oldData, readErr := os.ReadFile(oldPath)
+		if readErr != nil {
+			continue
+		}
+		var oldRaw map[string]interface{}
+		if json.Unmarshal(oldData, &oldRaw) != nil {
+			continue
+		}
+		if mergeInto(raw, mf.target, oldRaw) {
+			changed = true
+		}
+		toDelete = append(toDelete, oldPath)
 	}
 
-	// 升级配置默认值
-	if cfg.UpgradeInterval == 0 {
-		cfg.UpgradeInterval = DefaultUpgradeCheckInterval
+	// 步骤 3: 遍历规则表执行字段迁移
+	if migrateFields(raw) {
+		changed = true
 	}
-	if cfg.UpgradeChannel == "" {
-		cfg.UpgradeChannel = "stable"
+
+	// 步骤 4: 递归补齐默认值
+	if applyDefaults(raw, defaultConfigRaw()) {
+		changed = true
+	}
+
+	// 步骤 5: 持久化写回（失败不影响本次加载）
+	if changed {
+		if newData, marshalErr := json.MarshalIndent(raw, "", "  "); marshalErr == nil {
+			_ = os.WriteFile(path, newData, 0600)
+		}
+		for _, f := range toDelete {
+			_ = os.Remove(f)
+		}
+	}
+
+	// 从迁移后的 raw 反序列化为 Config
+	cfgData, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

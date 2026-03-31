@@ -109,15 +109,15 @@ func TestCheckRenewalNeeded(t *testing.T) {
 			name:       "已过期",
 			expiresAt:  now.AddDate(0, 0, -5).Format("2006-01-02"),
 			renewDays:  15,
-			wantRenew:  true,
-			wantReason: false,
+			wantRenew:  false, // 已过期需人工介入
+			wantReason: true,
 		},
 		{
 			name:       "无效日期格式",
 			expiresAt:  "invalid",
 			renewDays:  15,
-			wantRenew:  true, // 解析失败时继续处理
-			wantReason: false,
+			wantRenew:  false, // 解析失败跳过
+			wantReason: true,
 		},
 	}
 
@@ -233,7 +233,7 @@ func TestHandleProcessingOrder(t *testing.T) {
 			}
 
 			d := NewMockDeployer()
-			_, reason, err := handleProcessingOrder(d, cfg, tt.certData)
+			reason, err := handleProcessingOrder(d, cfg, tt.certData)
 
 			if err != nil {
 				t.Errorf("handleProcessingOrder() error = %v", err)
@@ -252,7 +252,8 @@ func TestTryUseLocalKey(t *testing.T) {
 		d.Store.(*MockOrderStore).HasPrivateKeyFunc = func(orderID int) bool { return false }
 
 		certData := makeTestCertData(123, "example.com", "active", "2025-01-01")
-		_, _, ok := tryUseLocalKey(d, certData, 123)
+		certCfg := &config.CertConfig{OrderID: 123, Domain: "example.com"}
+		_, _, ok := tryUseLocalKey(d, certData, certCfg)
 		if ok {
 			t.Error("没有本地私钥时应返回 false")
 		}
@@ -266,7 +267,8 @@ func TestTryUseLocalKey(t *testing.T) {
 		}
 
 		certData := makeTestCertData(123, "example.com", "active", "2025-01-01")
-		_, _, ok := tryUseLocalKey(d, certData, 123)
+		certCfg := &config.CertConfig{OrderID: 123, Domain: "example.com"}
+		_, _, ok := tryUseLocalKey(d, certData, certCfg)
 		if ok {
 			t.Error("加载私钥失败时应返回 false")
 		}
@@ -452,10 +454,10 @@ func TestMockAPIClient(t *testing.T) {
 				return &api.UpdateResponse{
 					Code: 1,
 					Msg:  "success",
-					Data: api.CertData{
+					Data: api.UpdateResponseData{CertData: api.CertData{
 						OrderID: 456,
 						Status:  "processing",
-					},
+					}},
 				}, nil
 			},
 		}
@@ -542,17 +544,6 @@ func TestMockOrderStore(t *testing.T) {
 		err := store.SaveCertificate(123, "cert-pem", "chain-pem")
 		if err != nil {
 			t.Errorf("SaveCertificate() error = %v", err)
-		}
-	})
-
-	t.Run("保存元数据", func(t *testing.T) {
-		store := &MockOrderStore{}
-		err := store.SaveMeta(123, &cert.OrderMeta{
-			OrderID: 123,
-			Domain:  "example.com",
-		})
-		if err != nil {
-			t.Errorf("SaveMeta() error = %v", err)
 		}
 	})
 
@@ -775,10 +766,10 @@ func TestDeployCertWithRules(t *testing.T) {
 		}
 		// 证书2: OrderID=200, 域名 shared.com, 到期更晚
 		certCfg2 := config.CertConfig{
-			OrderID:   200,
-			Domain:    "other.com",
-			Enabled:   true,
-			ExpiresAt: "2099-12-31",
+			OrderID:  200,
+			Domain:   "other.com",
+			Enabled:  true,
+			Metadata: config.CertMetadata{CertExpiresAt: "2099-12-31"},
 			BindRules: []config.BindRule{
 				{Domain: "shared.com", Port: 443},
 			},
@@ -1027,10 +1018,10 @@ func TestSubmitNewCSR(t *testing.T) {
 			return &api.UpdateResponse{
 				Code: 1,
 				Msg:  "success",
-				Data: api.CertData{
+				Data: api.UpdateResponseData{CertData: api.CertData{
 					OrderID: 200,
 					Status:  "processing",
-				},
+				}},
 			}, nil
 		}
 
@@ -1140,7 +1131,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 		d := NewMockDeployer()
 
 		cfg := &config.Config{
-			RenewDays: 13,
+			Schedule: config.Schedule{RenewBeforeDays: 13},
 			Certificates: []config.CertConfig{
 				{
 					OrderID: 100,
@@ -1172,7 +1163,7 @@ func TestAutoDeploy_Integration_NoAPI(t *testing.T) {
 		d := NewMockDeployer()
 
 		cfg := &config.Config{
-			RenewDays: 13,
+			Schedule: config.Schedule{RenewBeforeDays: 13},
 			Certificates: []config.CertConfig{
 				{
 					OrderID: 100,

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"sslctlw/api"
 )
 
 // GitHubChecker GitHub Release 版本检测器
@@ -29,19 +29,47 @@ func NewGitHubChecker(apiURL string) *GitHubChecker {
 	}
 }
 
-// ReleasesResponse releases.json 响应结构
-type ReleasesResponse struct {
-	Releases []ReleaseResponse `json:"releases"`
+// ReleasesData releases.json 顶层结构（spec 6.1）
+// 通道名做顶层 key：{"main": {...}, "dev": {...}}
+type ReleasesData map[string]ChannelRelease
+
+// ChannelRelease 单个通道的版本数据
+type ChannelRelease struct {
+	Latest   string         `json:"latest"`
+	Versions []VersionEntry `json:"versions"`
 }
 
-// CheckUpdate 检查是否有可用更新
-// 支持 releases.json 数组格式 {"releases": [...]}
+// VersionEntry releases.json 中的版本条目（spec 6.1）
+type VersionEntry struct {
+	Version    string            `json:"version"`
+	ReleasedAt string            `json:"released_at"`
+	Checksums  map[string]string `json:"checksums"` // {filename: "sha256:..."}
+}
+
+// productFilename 构建当前平台的产物文件名（spec §8.1）
+// 格式: {product}-{os}-{arch}.{ext}，版本在目录路径中体现
+func productFilename() string {
+	return "sslctlw-windows-amd64.exe"
+}
+
+// CheckUpdate 检查是否有可用更新（spec 6.1-6.3）
+// 读取 releases.json，按 upgrade_channel 读取对应通道数据
 func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, currentVersion string) (*ReleaseInfo, error) {
 	if c.apiURL == "" {
 		return nil, fmt.Errorf("Release API 地址未配置")
 	}
+	if !ValidChannel(Channel(channel)) {
+		return nil, fmt.Errorf("无效的升级通道: %q", channel)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.apiURL, nil)
+	// SSRF 防护（spec 10.1）
+	if allowed, reason := api.IsAllowedAPIURL(c.apiURL); !allowed {
+		return nil, fmt.Errorf("升级地址不允许: %s", reason)
+	}
+
+	releasesURL := strings.TrimRight(c.apiURL, "/") + "/releases.json"
+
+	req, err := http.NewRequestWithContext(ctx, "GET", releasesURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -56,144 +84,62 @@ func (c *GitHubChecker) CheckUpdate(ctx context.Context, channel string, current
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil // 没有发布版本
+		return nil, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("API 返回错误: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 限制 1MB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %w", err)
 	}
 
-	// 解析 releases.json 数组格式
-	var releasesResp ReleasesResponse
-	if err := json.Unmarshal(body, &releasesResp); err != nil {
+	var releasesData ReleasesData
+	if err := json.Unmarshal(body, &releasesData); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
 	}
 
-	if len(releasesResp.Releases) == 0 {
+	// 读取对应通道数据（spec 6.2）
+	channelData, ok := releasesData[channel]
+	if !ok || channelData.Latest == "" {
 		return nil, nil
 	}
 
-	// 遍历所有 release，找到比当前版本新的最新版本
-	var bestRelease *ReleaseResponse
-	var bestVersion string
-
-	for i := range releasesResp.Releases {
-		release := &releasesResp.Releases[i]
-
-		// stable 通道不接收 prerelease 版本
-		if channel == string(ChannelStable) && release.Prerelease {
-			continue
-		}
-
-		version := strings.TrimPrefix(release.TagName, "v")
-
-		// 必须比当前版本新
-		if CompareVersion(version, currentVersion) <= 0 {
-			continue
-		}
-
-		// 找最新的
-		if bestRelease == nil || CompareVersion(version, bestVersion) > 0 {
-			bestRelease = release
-			bestVersion = version
-		}
-	}
-
-	if bestRelease == nil {
+	if CompareVersion(channelData.Latest, currentVersion) <= 0 {
 		return nil, nil
 	}
 
-	// 查找 Windows EXE 附件（优先匹配 sslctlw*.exe，避免误选其他 EXE）
-	var downloadURL string
-	var fileSize int64
-	for _, asset := range bestRelease.Assets {
-		nameLower := strings.ToLower(asset.Name)
-		if strings.HasPrefix(nameLower, "sslctlw") && strings.HasSuffix(nameLower, ".exe") {
-			downloadURL = asset.BrowserDownloadURL
-			fileSize = asset.Size
+	// 在 versions 中找到 latest 对应条目
+	var entry *VersionEntry
+	for i := range channelData.Versions {
+		if channelData.Versions[i].Version == channelData.Latest {
+			entry = &channelData.Versions[i]
 			break
 		}
 	}
-	// 回退：如果没有匹配 sslctlw*.exe 的文件，取第一个 .exe
-	if downloadURL == "" {
-		for _, asset := range bestRelease.Assets {
-			if strings.HasSuffix(strings.ToLower(asset.Name), ".exe") {
-				downloadURL = asset.BrowserDownloadURL
-				fileSize = asset.Size
-				break
-			}
-		}
+	if entry == nil {
+		return nil, nil
 	}
 
-	if downloadURL == "" {
-		return nil, fmt.Errorf("未找到可下载的 EXE 文件")
+	// 拼出文件名，从 checksums 获取哈希（spec 6.3）
+	filename := productFilename()
+	checksum := entry.Checksums[filename]
+	if checksum == "" {
+		return nil, fmt.Errorf("版本 %s 缺少 %s 的 SHA256 校验值", entry.Version, filename)
 	}
 
-	// 解析发布说明中的元数据
-	metadata := parseMetadata(bestRelease.Body)
+	// 下载 URL: {release_url}/{channel}/v{version}/{filename}（spec 6.3）
+	baseURL := strings.TrimRight(c.apiURL, "/")
+	downloadURL := baseURL + "/" + channel + "/v" + entry.Version + "/" + filename
 
-	// 确定通道
-	ch := ChannelStable
-	if bestRelease.Prerelease {
-		ch = ChannelBeta
-	}
-
-	info := &ReleaseInfo{
-		Version:      bestVersion,
-		Channel:      ch,
-		DownloadURL:  downloadURL,
-		FileSize:     fileSize,
-		ReleaseNotes: cleanReleaseNotes(bestRelease.Body),
-		MinVersion:   metadata["min_version"],
-	}
-
-	// 解析发布时间
-	if t, err := time.Parse(time.RFC3339, bestRelease.PublishedAt); err == nil {
-		info.ReleaseDate = t
-	}
-
-	return info, nil
-}
-
-// parseMetadata 从发布说明中解析元数据
-// 格式: <!-- metadata: key=value; key2=value2 -->
-func parseMetadata(body string) map[string]string {
-	metadata := make(map[string]string)
-
-	// 匹配 <!-- metadata: ... -->
-	re := regexp.MustCompile(`<!--\s*metadata:\s*([^>]+)\s*-->`)
-	matches := re.FindStringSubmatch(body)
-	if len(matches) < 2 {
-		return metadata
-	}
-
-	// 解析 key=value 对
-	pairs := strings.Split(matches[1], ";")
-	for _, pair := range pairs {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.TrimSpace(parts[1])
-			metadata[key] = value
-		}
-	}
-
-	return metadata
-}
-
-// cleanReleaseNotes 清理发布说明（移除元数据注释）
-func cleanReleaseNotes(body string) string {
-	re := regexp.MustCompile(`<!--\s*metadata:[^>]+-->`)
-	return strings.TrimSpace(re.ReplaceAllString(body, ""))
+	return &ReleaseInfo{
+		Version:     entry.Version,
+		Channel:     Channel(channel),
+		DownloadURL: downloadURL,
+		Checksum:    checksum,
+	}, nil
 }
 
 // CompareVersion 比较两个版本号
@@ -325,62 +271,3 @@ func parseVersionParts(v string) []int {
 	return result
 }
 
-// GetUpgradePath 获取升级路径
-func (c *GitHubChecker) GetUpgradePath(ctx context.Context, currentVersion, targetVersion string) (*UpgradePath, error) {
-	if c.apiURL == "" {
-		return nil, fmt.Errorf("Release API 地址未配置")
-	}
-
-	// 构建升级路径 API 地址
-	baseURL, err := url.Parse(c.apiURL)
-	if err != nil {
-		return nil, fmt.Errorf("解析 API URL 失败: %w", err)
-	}
-	baseURL.Path = strings.TrimSuffix(baseURL.Path, "/latest")
-	baseURL.Path = strings.TrimSuffix(baseURL.Path, "/releases")
-	baseURL.Path += "/upgrade-path"
-	q := baseURL.Query()
-	q.Set("from", currentVersion)
-	q.Set("to", targetVersion)
-	baseURL.RawQuery = q.Encode()
-	pathURL := baseURL.String()
-
-	req, err := http.NewRequestWithContext(ctx, "GET", pathURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "sslctlw-updater")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		// 没有升级路径，可能不需要链式升级
-		return nil, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API 返回错误: HTTP %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
-	}
-
-	var path UpgradePath
-	if err := json.Unmarshal(body, &path); err != nil {
-		return nil, fmt.Errorf("解析响应失败: %w", err)
-	}
-
-	if len(path.Steps) == 0 {
-		return nil, nil
-	}
-
-	return &path, nil
-}

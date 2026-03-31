@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -56,8 +57,11 @@ func TestDefaultConfig(t *testing.T) {
 		t.Fatal("DefaultConfig() returned nil")
 	}
 
-	if cfg.RenewDays != 13 {
-		t.Errorf("RenewDays = %d, want 13", cfg.RenewDays)
+	if cfg.Schedule.RenewBeforeDays != 14 {
+		t.Errorf("Schedule.RenewBeforeDays = %d, want 14", cfg.Schedule.RenewBeforeDays)
+	}
+	if cfg.Schedule.RenewMode != "pull" {
+		t.Errorf("Schedule.RenewMode = %q, want %q", cfg.Schedule.RenewMode, "pull")
 	}
 
 	if cfg.TaskName != "SSLCtlW" {
@@ -316,12 +320,14 @@ func TestCertConfig_AllFields(t *testing.T) {
 		OrderID:          123,
 		Domain:           "example.com",
 		Domains:          []string{"example.com", "www.example.com"},
-		ExpiresAt:        "2025-12-31",
-		SerialNumber:     "ABC123",
 		Enabled:          true,
-		UseLocalKey:      true,
+		RenewMode:        "local",
 		ValidationMethod: "file",
 		AutoBindMode:     true,
+		Metadata: CertMetadata{
+			CertExpiresAt: "2025-12-31",
+			CertSerial:    "ABC123",
+		},
 		BindRules: []BindRule{
 			{Domain: "www.example.com", Port: 443},
 		},
@@ -336,17 +342,17 @@ func TestCertConfig_AllFields(t *testing.T) {
 	if len(cert.Domains) != 2 {
 		t.Errorf("Domains 长度 = %d", len(cert.Domains))
 	}
-	if cert.ExpiresAt != "2025-12-31" {
-		t.Errorf("ExpiresAt = %q", cert.ExpiresAt)
+	if cert.Metadata.CertExpiresAt != "2025-12-31" {
+		t.Errorf("Metadata.CertExpiresAt = %q", cert.Metadata.CertExpiresAt)
 	}
-	if cert.SerialNumber != "ABC123" {
-		t.Errorf("SerialNumber = %q", cert.SerialNumber)
+	if cert.Metadata.CertSerial != "ABC123" {
+		t.Errorf("Metadata.CertSerial = %q", cert.Metadata.CertSerial)
 	}
 	if !cert.Enabled {
 		t.Error("Enabled 应该为 true")
 	}
-	if !cert.UseLocalKey {
-		t.Error("UseLocalKey 应该为 true")
+	if cert.RenewMode != "local" {
+		t.Errorf("RenewMode = %q, want %q", cert.RenewMode, "local")
 	}
 	if cert.ValidationMethod != "file" {
 		t.Errorf("ValidationMethod = %q", cert.ValidationMethod)
@@ -512,8 +518,8 @@ func TestLoad_DefaultConfig(t *testing.T) {
 	}
 
 	// 验证默认值
-	if cfg.RenewDays == 0 {
-		t.Error("RenewDays 应该有默认值")
+	if cfg.Schedule.RenewBeforeDays == 0 {
+		t.Error("Schedule.RenewBeforeDays 应该有默认值")
 	}
 }
 
@@ -609,8 +615,11 @@ func TestValidateValidationMethod_MoreCases(t *testing.T) {
 // TestConfig_AllFields 测试 Config 所有字段
 func TestConfig_AllFields(t *testing.T) {
 	cfg := &Config{
-		Certificates:     []CertConfig{{OrderID: 1}},
-		RenewDays:        20,
+		Certificates: []CertConfig{{OrderID: 1}},
+		Schedule: Schedule{
+			RenewMode:       "pull",
+			RenewBeforeDays: 20,
+		},
 		LastCheck:        "2024-01-01 00:00:00",
 		AutoCheckEnabled: true,
 		TaskName:         "CustomTask",
@@ -620,8 +629,8 @@ func TestConfig_AllFields(t *testing.T) {
 	if len(cfg.Certificates) != 1 {
 		t.Errorf("Certificates 长度 = %d", len(cfg.Certificates))
 	}
-	if cfg.RenewDays != 20 {
-		t.Errorf("RenewDays = %d", cfg.RenewDays)
+	if cfg.Schedule.RenewBeforeDays != 20 {
+		t.Errorf("Schedule.RenewBeforeDays = %d", cfg.Schedule.RenewBeforeDays)
 	}
 	if cfg.LastCheck != "2024-01-01 00:00:00" {
 		t.Errorf("LastCheck = %q", cfg.LastCheck)
@@ -702,4 +711,97 @@ func TestCertAPIConfig_SetToken_Multiple(t *testing.T) {
 	if token2 != "token2" {
 		t.Errorf("GetToken() = %q, want %q", token2, "token2")
 	}
+}
+
+// TestSchedule_DefaultValues 测试 Schedule 默认值
+func TestSchedule_DefaultValues(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Schedule.RenewBeforeDays != 14 {
+		t.Errorf("默认 RenewBeforeDays = %d, want 14", cfg.Schedule.RenewBeforeDays)
+	}
+	if cfg.Schedule.RenewMode != "pull" {
+		t.Errorf("默认 RenewMode = %q, want %q", cfg.Schedule.RenewMode, "pull")
+	}
+}
+
+// TestConfig_MigrateOldRenewDays 测试旧 renew_days 字段迁移到 schedule.renew_before_days
+func TestConfig_MigrateOldRenewDays(t *testing.T) {
+	t.Run("旧格式-迁移renew_days到schedule", func(t *testing.T) {
+		oldJSON := `{"certificates":[],"renew_days":20,"task_name":"SSLCtlW"}`
+
+		cfg, err := migrateAndUnmarshal([]byte(oldJSON))
+		if err != nil {
+			t.Fatalf("migrateAndUnmarshal() error = %v", err)
+		}
+
+		if cfg.Schedule.RenewBeforeDays != 20 {
+			t.Errorf("迁移后 Schedule.RenewBeforeDays = %d, want 20", cfg.Schedule.RenewBeforeDays)
+		}
+	})
+
+	t.Run("新格式-schedule对象正常工作", func(t *testing.T) {
+		newJSON := `{"certificates":[],"schedule":{"renew_mode":"pull","renew_before_days":30}}`
+
+		cfg, err := migrateAndUnmarshal([]byte(newJSON))
+		if err != nil {
+			t.Fatalf("migrateAndUnmarshal() error = %v", err)
+		}
+
+		if cfg.Schedule.RenewBeforeDays != 30 {
+			t.Errorf("Schedule.RenewBeforeDays = %d, want 30", cfg.Schedule.RenewBeforeDays)
+		}
+		if cfg.Schedule.RenewMode != "pull" {
+			t.Errorf("Schedule.RenewMode = %q, want %q", cfg.Schedule.RenewMode, "pull")
+		}
+	})
+
+	t.Run("无任何续签配置-使用默认值14", func(t *testing.T) {
+		emptyJSON := `{"certificates":[]}`
+
+		cfg, err := migrateAndUnmarshal([]byte(emptyJSON))
+		if err != nil {
+			t.Fatalf("migrateAndUnmarshal() error = %v", err)
+		}
+
+		if cfg.Schedule.RenewBeforeDays != 14 {
+			t.Errorf("默认 RenewBeforeDays = %d, want 14", cfg.Schedule.RenewBeforeDays)
+		}
+	})
+
+	t.Run("新格式优先-旧字段不覆盖", func(t *testing.T) {
+		bothJSON := `{"certificates":[],"renew_days":10,"schedule":{"renew_mode":"pull","renew_before_days":25}}`
+
+		cfg, err := migrateAndUnmarshal([]byte(bothJSON))
+		if err != nil {
+			t.Fatalf("migrateAndUnmarshal() error = %v", err)
+		}
+
+		// schedule 已有值（25），旧 renew_days（10）不应覆盖
+		if cfg.Schedule.RenewBeforeDays != 25 {
+			t.Errorf("新格式优先，RenewBeforeDays = %d, want 25", cfg.Schedule.RenewBeforeDays)
+		}
+	})
+}
+
+// migrateAndUnmarshal 模拟 Load() 中的完整迁移流程，用于单元测试
+// 规则迁移 → 递归补齐默认值 → 反序列化
+func migrateAndUnmarshal(data []byte) (*Config, error) {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	migrateFields(raw)
+	applyDefaults(raw, defaultConfigRaw())
+
+	cfgData, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := json.Unmarshal(cfgData, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }

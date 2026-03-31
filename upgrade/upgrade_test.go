@@ -159,8 +159,8 @@ func TestDefaultConfig(t *testing.T) {
 		t.Error("默认配置应该启用升级检查")
 	}
 
-	if cfg.Channel != ChannelStable {
-		t.Errorf("默认通道 = %q, want %q", cfg.Channel, ChannelStable)
+	if cfg.Channel != ChannelMain {
+		t.Errorf("默认通道 = %q, want %q", cfg.Channel, ChannelMain)
 	}
 
 	if cfg.CheckInterval != 24 {
@@ -192,20 +192,6 @@ func TestGetVerifyConfig(t *testing.T) {
 
 	if len(vc.TrustedCAs) != 2 {
 		t.Errorf("TrustedCAs 长度 = %d, want 2", len(vc.TrustedCAs))
-	}
-}
-
-// TestErrNeedChainUpgrade 测试链式升级错误
-func TestErrNeedChainUpgrade(t *testing.T) {
-	err := &ErrNeedChainUpgrade{
-		CurrentVersion: "1.0.0",
-		TargetVersion:  "2.0.0",
-		MinVersion:     "1.5.0",
-	}
-
-	expected := "当前版本 1.0.0 低于最低要求 1.5.0，需要链式升级到 2.0.0"
-	if err.Error() != expected {
-		t.Errorf("Error() = %q, want %q", err.Error(), expected)
 	}
 }
 
