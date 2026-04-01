@@ -27,9 +27,9 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
     $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
     $built = $chain.Build($cert)
 
-    $status = "完整"
+    $status = "OK"
     if ($cert.Issuer -eq $cert.Subject) {
-        $status = "自签名"
+        $status = "SELFSIGNED"
     } elseif (-not $built) {
         $flags = 0
         foreach ($s in $chain.ChainStatus) {
@@ -38,11 +38,11 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
         $partial = [System.Security.Cryptography.X509Certificates.X509ChainStatusFlags]::PartialChain
         $untrusted = [System.Security.Cryptography.X509Certificates.X509ChainStatusFlags]::UntrustedRoot
         if ($flags -band $partial) {
-            $status = "缺少中级证书"
+            $status = "PARTIAL"
         } elseif ($flags -band $untrusted) {
-            $status = "根证书不受信任"
+            $status = "UNTRUSTED"
         } else {
-            $status = "链不完整"
+            $status = "INCOMPLETE"
         }
     }
 
@@ -64,11 +64,48 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
 		}
 		parts := strings.SplitN(line, "|", 2)
 		if len(parts) == 2 {
-			result[strings.ToUpper(strings.TrimSpace(parts[0]))] = strings.TrimSpace(parts[1])
+			result[strings.ToUpper(strings.TrimSpace(parts[0]))] = translateChainStatus(strings.TrimSpace(parts[1]))
 		}
 	}
 
 	return result, nil
+}
+
+// translateChainStatus 将 ASCII 状态码翻译为中文显示
+func translateChainStatus(code string) string {
+	switch code {
+	case "OK":
+		return "完整"
+	case "SELFSIGNED":
+		return "自签名"
+	case "PARTIAL":
+		return "缺少中级证书"
+	case "UNTRUSTED":
+		return "根证书不受信任"
+	case "INCOMPLETE":
+		return "链不完整"
+	default:
+		return code
+	}
+}
+
+// translateDetail 将 ASCII DETAIL 标识翻译为中文
+func translateDetail(s string) string {
+	prefixes := map[string]string{
+		"INSTALLED_INTERMEDIATE: ": "已安装中级证书: ",
+		"DOWNLOAD_FAILED: ":       "下载失败: ",
+		"FIX_FAILED: ":            "修复失败: ",
+		"NO_AIA: ":                "跳过(无 AIA 扩展): ",
+		"INSTALLED_ROOT: ":        "已安装根证书: ",
+		"ROOT_INSTALL_FAILED: ":   "安装根证书失败: ",
+		"NOT_SELFSIGNED_ROOT: ":   "跳过(链末端非自签名根证书): ",
+	}
+	for prefix, translated := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return translated + s[len(prefix):]
+		}
+	}
+	return s
 }
 
 // FixCertChains 补齐所有证书的证书链
@@ -117,15 +154,15 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
                         $store.Add($intermediateCert)
                         $store.Close()
                         $fixedThis = $true
-                        Write-Output "DETAIL|已安装中级证书: $($intermediateCert.Subject)"
+                        Write-Output "DETAIL|INSTALLED_INTERMEDIATE: $($intermediateCert.Subject)"
                     } catch {
-                        Write-Output "DETAIL|下载失败: $($cert.Subject) - $($urlMatch.Value): $($_.Exception.Message)"
+                        Write-Output "DETAIL|DOWNLOAD_FAILED: $($cert.Subject) - $($urlMatch.Value): $($_.Exception.Message)"
                     }
                 }
-                if ($fixedThis) { $fixed++ } else { $failed++; Write-Output "DETAIL|修复失败: $($cert.Subject) - 无法下载中级证书" }
+                if ($fixedThis) { $fixed++ } else { $failed++; Write-Output "DETAIL|FIX_FAILED: $($cert.Subject)" }
             } else {
                 $failed++
-                Write-Output "DETAIL|跳过: $($cert.Subject) - 无 AIA 扩展"
+                Write-Output "DETAIL|NO_AIA: $($cert.Subject)"
             }
         } elseif ($flags -band $untrusted) {
             # 根证书不受信任：从链中提取根证书安装到 Root 存储
@@ -140,10 +177,10 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
                         $store.Add($rootCert)
                         $store.Close()
                         $fixedRoots[$rootTP] = $true
-                        Write-Output "DETAIL|已安装根证书: $($rootCert.Subject)"
+                        Write-Output "DETAIL|INSTALLED_ROOT: $($rootCert.Subject)"
                     } catch {
                         $failed++
-                        Write-Output "DETAIL|安装根证书失败: $($rootCert.Subject): $($_.Exception.Message)"
+                        Write-Output "DETAIL|ROOT_INSTALL_FAILED: $($rootCert.Subject): $($_.Exception.Message)"
                         $chain.Dispose()
                         return
                     }
@@ -151,7 +188,7 @@ Get-ChildItem -Path Cert:\LocalMachine\My | ForEach-Object {
                 $fixed++
             } else {
                 $failed++
-                Write-Output "DETAIL|跳过: $($cert.Subject) - 链末端非自签名根证书"
+                Write-Output "DETAIL|NOT_SELFSIGNED_ROOT: $($cert.Subject)"
             }
         }
     }
@@ -174,7 +211,7 @@ Write-Output "SUMMARY|$checked|$fixed|$failed"
 			continue
 		}
 		if detail, ok := strings.CutPrefix(line, "DETAIL|"); ok {
-			result.Details = append(result.Details, detail)
+			result.Details = append(result.Details, translateDetail(detail))
 		} else if _, ok := strings.CutPrefix(line, "SUMMARY|"); ok {
 			parts := strings.Split(line, "|")
 			if len(parts) == 4 {

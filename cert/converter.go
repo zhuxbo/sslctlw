@@ -65,7 +65,7 @@ func PEMToPFX(certPEM, keyPEM, intermediatePEM, password string) (string, error)
 	}
 
 	// 生成 PFX
-	pfxData, err := pkcs12.Modern.Encode(privateKey, cert, caCerts, password)
+	pfxData, err := pkcs12.LegacyDES.Encode(privateKey, cert, caCerts, password)
 	if err != nil {
 		return "", fmt.Errorf("生成 PFX 失败: %w", err)
 	}

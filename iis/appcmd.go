@@ -159,7 +159,15 @@ func parseBindings(bindingsStr string) []BindingInfo {
 			ip = "0.0.0.0"
 		}
 
-		port, parseErr := strconv.Atoi(colonParts[1])
+		portStr := colonParts[1]
+		if portStr == "*" {
+			if protocol == "https" {
+				portStr = "443"
+			} else {
+				portStr = "80"
+			}
+		}
+		port, parseErr := strconv.Atoi(portStr)
 		if parseErr != nil {
 			log.Printf("警告: 绑定端口 %q 解析失败: %v", colonParts[1], parseErr)
 			continue
