@@ -149,14 +149,14 @@ function Get-TargetVersion {
 
     $releaseInfo = $null
     $releaseUrl = "$BaseUrl/releases.json"
+    $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
     try {
-        $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
         $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -TimeoutSec 30 -ErrorAction Stop
-        $ProgressPreference = $prevPref
     } catch {
         Write-NetworkError -ErrorMessage $_.Exception.Message -Url $releaseUrl
         if (-not $RequestedVersion) { return $null }
     }
+    $ProgressPreference = $prevPref
 
     $channel = ""
     $targetVersion = ""
@@ -218,12 +218,13 @@ function Get-TargetVersion {
 function Download-Package {
     param([string]$Url, [string]$OutFile)
 
+    $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
     try {
-        $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 120 -ErrorAction Stop
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 120 -UseBasicParsing -ErrorAction Stop
         $ProgressPreference = $prevPref
         return $true
     } catch {
+        $ProgressPreference = $prevPref
         Write-NetworkError -ErrorMessage $_.Exception.Message -Url $Url
         return $false
     }
