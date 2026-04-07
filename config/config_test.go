@@ -72,9 +72,6 @@ func TestDefaultConfig(t *testing.T) {
 		t.Error("AutoCheckEnabled should be false by default")
 	}
 
-	if cfg.IIS7Mode {
-		t.Error("IIS7Mode should be false by default")
-	}
 }
 
 func TestGetDefaultBindRules(t *testing.T) {
@@ -623,7 +620,6 @@ func TestConfig_AllFields(t *testing.T) {
 		LastCheck:        "2024-01-01 00:00:00",
 		AutoCheckEnabled: true,
 		TaskName:         "CustomTask",
-		IIS7Mode:         true,
 	}
 
 	if len(cfg.Certificates) != 1 {
@@ -640,9 +636,6 @@ func TestConfig_AllFields(t *testing.T) {
 	}
 	if cfg.TaskName != "CustomTask" {
 		t.Errorf("TaskName = %q", cfg.TaskName)
-	}
-	if !cfg.IIS7Mode {
-		t.Error("IIS7Mode 应该为 true")
 	}
 }
 

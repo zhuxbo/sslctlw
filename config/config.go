@@ -113,8 +113,6 @@ type Config struct {
 	LastCheck        string       `json:"last_check"`                // 上次检查时间
 	AutoCheckEnabled bool         `json:"auto_check_enabled"`        // 是否启用自动部署（任务计划）
 	TaskName         string       `json:"task_name"`                 // 任务计划名称
-	IIS7Mode         bool         `json:"iis7_mode"`                 // IIS7 兼容模式（自动检测）
-
 	// 升级配置
 	UpgradeEnabled   bool   `json:"upgrade_enabled"`     // 启用自动检查更新，默认 true
 	UpgradeChannel   string `json:"upgrade_channel"`     // 版本通道: main | dev，默认 main
@@ -134,7 +132,6 @@ func DefaultConfig() *Config {
 		},
 		AutoCheckEnabled: false,
 		TaskName:         DefaultTaskName,
-		IIS7Mode:         false,
 		// 升级配置默认值
 		UpgradeEnabled:  true,
 		UpgradeChannel:  "main",

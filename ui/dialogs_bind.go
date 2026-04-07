@@ -32,7 +32,7 @@ func ShowBindDialog(owner ui.Parent, site *iis.SiteInfo, certs []cert.CertInfo, 
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title(fmt.Sprintf("绑定证书 - %s", site.Name)).
-			Size(ui.Dpi(500, 450)).
+			Size(ui.Dpi(500, 395)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 

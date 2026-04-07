@@ -33,7 +33,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("检查更新").
-			Size(ui.Dpi(480, 380)).
+			Size(ui.Dpi(480, 335)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 
@@ -313,7 +313,7 @@ func showConfigureReleaseURLDialog(owner ui.Parent, cfg *config.Config) string {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("配置升级服务").
-			Size(ui.Dpi(420, 190)).
+			Size(ui.Dpi(420, 155)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 
@@ -428,7 +428,7 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("升级设置").
-			Size(ui.Dpi(400, 250)).
+			Size(ui.Dpi(400, 215)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 

@@ -320,7 +320,6 @@ if ($cert) {
 }
 
 // GetWildcardName 获取通配符格式的友好名称
-// 用于 IIS7 兼容模式，同一 IP:Port 只能绑定一个证书
 func GetWildcardName(domain string) string {
 	// 如果已经是通配符格式，直接返回
 	if strings.HasPrefix(domain, "*.") {

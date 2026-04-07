@@ -61,8 +61,6 @@ func TestIISLocalOperations(t *testing.T) {
 
 		t.Logf("IIS 版本: %d", version)
 
-		isIIS7 := iis.IsIIS7()
-		t.Logf("IsIIS7 (版本 <= 7.5): %v", isIIS7)
 	})
 
 	t.Run("FindMatchingBindings", func(t *testing.T) {

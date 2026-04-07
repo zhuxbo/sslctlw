@@ -53,12 +53,6 @@ func GetIISMajorVersion() (int, error) {
 	return version, nil
 }
 
-// IsIIS7 检查是否是 IIS7 (版本 < 8，不支持 SNI)
-func IsIIS7() bool {
-	version, err := GetIISMajorVersion()
-	return err == nil && version < 8
-}
-
 // appcmd XML 输出结构
 type appcmdSiteList struct {
 	XMLName xml.Name     `xml:"appcmd"`

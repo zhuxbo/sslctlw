@@ -18,7 +18,7 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("管理自动更新证书").
-			Size(ui.Dpi(600, 400)).
+			Size(ui.Dpi(600, 365)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 
@@ -46,9 +46,6 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 	btnToggleLocalKey := ui.NewButton(dlg, ui.OptsButton().Text("本机提交").Position(ui.Dpi(150, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
 	btnToggleValidation := ui.NewButton(dlg, ui.OptsButton().Text("验证方法").Position(ui.Dpi(225, 270)).Width(ui.DpiX(70)).Height(ui.DpiY(28)))
 	btnRefresh := ui.NewButton(dlg, ui.OptsButton().Text("刷新").Position(ui.Dpi(300, 270)).Width(ui.DpiX(50)).Height(ui.DpiY(28)))
-
-	// 配置区
-	chkIIS7Mode := ui.NewCheckBox(dlg, ui.OptsCheckBox().Text("IIS7 兼容模式").Position(ui.Dpi(20, 315)))
 
 	// 底部按钮
 	btnSave := ui.NewButton(dlg, ui.OptsButton().Text("保存").Position(ui.Dpi(400, 320)).Width(ui.DpiX(80)).Height(ui.DpiY(30)))
@@ -93,7 +90,6 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 		lstCerts.Cols.Add("本机提交", ui.DpiX(60))
 		lstCerts.Cols.Add("验证方法", ui.DpiX(60))
 
-		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
 		refreshList()
 
 		btnToggle.Hwnd().EnableWindow(false)
@@ -223,7 +219,6 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 			newCfg = config.DefaultConfig()
 		}
 		cfg = newCfg
-		chkIIS7Mode.SetCheck(cfg.IIS7Mode)
 		selectedIdx = -1
 		refreshList()
 		updateButtonStates()
@@ -231,8 +226,6 @@ func ShowCertManagerDialog(owner ui.Parent, onSuccess func()) {
 
 	// 保存
 	btnSave.On().BnClicked(func() {
-		cfg.IIS7Mode = chkIIS7Mode.IsChecked()
-
 		if err := cfg.Save(); err != nil {
 			ui.MsgError(dlg, "错误", "保存失败", err.Error())
 			return

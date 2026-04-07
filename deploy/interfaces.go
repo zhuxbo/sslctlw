@@ -32,8 +32,6 @@ type IISBinder interface {
 	BindCertificateByIP(ip string, port int, certHash string) error
 	// FindBindingsForDomains 查找域名匹配的绑定
 	FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error)
-	// IsIIS7 检查是否为 IIS7
-	IsIIS7() bool
 }
 
 // APIClient API 客户端接口

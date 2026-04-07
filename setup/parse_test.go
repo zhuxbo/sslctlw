@@ -92,6 +92,24 @@ func TestParseCommand(t *testing.T) {
 			input:   "sslctlw setup --url https://api.example.com --token abc123 --key",
 			wantErr: true,
 		},
+		{
+			name:      "URL 格式带 order",
+			input:     "https://www.cnssl.com/api/deploy?token=abc123&order=12345",
+			wantURL:   "https://www.cnssl.com/api/deploy",
+			wantToken: "abc123",
+			wantOrder: "12345",
+		},
+		{
+			name:      "URL 格式无 order",
+			input:     "https://www.cnssl.com/api/deploy?token=abc123",
+			wantURL:   "https://www.cnssl.com/api/deploy",
+			wantToken: "abc123",
+		},
+		{
+			name:    "URL 格式缺少 token",
+			input:   "https://www.cnssl.com/api/deploy?order=12345",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

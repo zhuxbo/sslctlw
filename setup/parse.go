@@ -2,6 +2,7 @@ package setup
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -29,7 +30,12 @@ func ParseCommand(input string) (*Options, error) {
 		return nil, fmt.Errorf("命令为空")
 	}
 
-	// 分词（支持引号）
+	// URL 格式：https://xxx?token=xxx&order=xxx
+	if strings.HasPrefix(input, "http://") || strings.HasPrefix(input, "https://") {
+		return parseURL(input)
+	}
+
+	// 命令格式：sslctlw setup --url <url> --token <token> ...
 	args := tokenize(input)
 
 	// 跳过程序名和 setup 子命令
@@ -125,4 +131,30 @@ func tokenize(s string) []string {
 	}
 
 	return tokens
+}
+
+// parseURL 解析 URL 格式的部署链接
+// 支持: https://xxx/api/deploy?token=xxx&order=xxx
+func parseURL(input string) (*Options, error) {
+	parsed, err := url.Parse(input)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("URL 格式无效")
+	}
+
+	query := parsed.Query()
+	token := query.Get("token")
+	if token == "" {
+		return nil, fmt.Errorf("URL 缺少 token 参数")
+	}
+
+	// 基础 URL = scheme://host/path（不含查询参数）
+	baseURL := fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, parsed.Path)
+
+	opts := &Options{
+		URL:   baseURL,
+		Token: token,
+		Order: query.Get("order"),
+	}
+
+	return opts, nil
 }

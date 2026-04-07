@@ -190,7 +190,7 @@ func showPrivateKeyInputDialog(owner ui.Parent, domain string) string {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("提供私钥").
-			Size(ui.Dpi(480, 360)).
+			Size(ui.Dpi(480, 330)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 

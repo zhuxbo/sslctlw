@@ -434,9 +434,6 @@ func TestDockerCompatSiteOperations(t *testing.T) {
 		}
 		t.Logf("IIS 主版本: %d", version)
 
-		isIIS7 := iis.IsIIS7()
-		t.Logf("IsIIS7: %v", isIIS7)
-
 		// 记录 Windows 版本
 		if winVer := os.Getenv("WINDOWS_VERSION"); winVer != "" {
 			t.Logf("Windows Server 版本: %s", winVer)
