@@ -362,6 +362,7 @@ func printUsage() {
   sslctlw setup --url <url> --token <token>
   sslctlw setup --url <url> --token <token> --order <id>
   sslctlw setup --url <url> --token <token> --order "123,456"
+  sslctlw setup --url <url> --token <token> --key key.pem
 
 扫描:
   sslctlw scan

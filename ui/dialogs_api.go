@@ -110,6 +110,17 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 
 		// 异步执行
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					dlg.UiThread(func() {
+						if dlgCtx.Err() != nil {
+							return
+						}
+						btnExecute.Hwnd().EnableWindow(true)
+						txtDetail.SetText(fmt.Sprintf("操作异常: %v", r))
+					})
+				}
+			}()
 			var lines []string
 			progress := func(step, total int, message string) {
 				lines = append(lines, fmt.Sprintf("[%d/%d] %s", step, total, message))
@@ -121,7 +132,20 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 				})
 			}
 
-			err := setup.Run(*opts, progress)
+			// GUI 交互回调：弹窗让用户粘贴私钥 PEM
+			promptKey := func(domain string, certPEM string) string {
+				ch := make(chan string, 1)
+				dlg.UiThread(func() {
+					if dlgCtx.Err() != nil {
+						ch <- ""
+						return
+					}
+					ch <- showPrivateKeyInputDialog(dlg, domain)
+				})
+				return <-ch
+			}
+
+			_, err := setup.Run(*opts, progress, promptKey)
 
 			if dlgCtx.Err() != nil {
 				return
@@ -156,4 +180,69 @@ func ShowAPIDialog(owner ui.Parent, onSuccess func()) {
 	})
 
 	dlg.ShowModal()
+}
+
+// showPrivateKeyInputDialog 弹窗让用户粘贴私钥 PEM
+// 返回私钥 PEM 内容，空字符串表示取消/跳过
+func showPrivateKeyInputDialog(owner ui.Parent, domain string) string {
+	var result string
+
+	dlg := ui.NewModal(owner,
+		ui.OptsModal().
+			Title("提供私钥").
+			Size(ui.Dpi(480, 360)).
+			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
+	)
+
+	// 提示标签
+	ui.NewStatic(dlg,
+		ui.OptsStatic().
+			Text(fmt.Sprintf("证书 %s 需要私钥，请粘贴 PEM 格式私钥:", domain)).
+			Position(ui.Dpi(20, 15)),
+	)
+
+	// 多行文本框
+	txtKey := ui.NewEdit(dlg,
+		ui.OptsEdit().
+			Position(ui.Dpi(20, 40)).
+			Width(ui.DpiX(430)).
+			Height(ui.DpiY(230)).
+			CtrlStyle(co.ES_MULTILINE|co.ES_AUTOVSCROLL|co.ES_WANTRETURN).
+			WndStyle(co.WS_CHILD|co.WS_VISIBLE|co.WS_BORDER|co.WS_VSCROLL),
+	)
+
+	// 确定按钮
+	btnOk := ui.NewButton(dlg,
+		ui.OptsButton().
+			Text("确定").
+			Position(ui.Dpi(260, 285)).
+			Width(ui.DpiX(90)).
+			Height(ui.DpiY(30)),
+	)
+
+	// 跳过按钮
+	btnSkip := ui.NewButton(dlg,
+		ui.OptsButton().
+			Text("跳过").
+			Position(ui.Dpi(360, 285)).
+			Width(ui.DpiX(90)).
+			Height(ui.DpiY(30)),
+	)
+
+	btnOk.On().BnClicked(func() {
+		text := strings.TrimSpace(txtKey.Text())
+		if text == "" {
+			ui.MsgOk(dlg, "提示", "请粘贴私钥", "请粘贴 PEM 格式的私钥内容。")
+			return
+		}
+		result = text
+		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+	})
+
+	btnSkip.On().BnClicked(func() {
+		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+	})
+
+	dlg.ShowModal()
+	return result
 }

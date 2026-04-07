@@ -7,9 +7,10 @@ import (
 
 // Options 一键部署选项
 type Options struct {
-	URL   string // API 地址
-	Token string // API Token
-	Order string // 逗号分隔的订单 ID，空则查询全部
+	URL     string // API 地址
+	Token   string // API Token
+	Order   string // 逗号分隔的订单 ID，空则查询全部
+	KeyPath string // 私钥文件路径（--key 参数）
 }
 
 // ParseCommand 解析部署命令字符串
@@ -65,6 +66,12 @@ func ParseCommand(input string) (*Options, error) {
 			}
 			i++
 			opts.Order = args[i]
+		case "--key":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("--key 需要参数")
+			}
+			i++
+			opts.KeyPath = args[i]
 		case "--debug":
 			// 忽略
 		default:
