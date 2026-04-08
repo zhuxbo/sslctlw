@@ -33,7 +33,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("检查更新").
-			Size(ui.Dpi(480, 380)).
+			Size(ui.Dpi(480, 335)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 
@@ -41,6 +41,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 
 	var latestInfo *upgrade.ReleaseInfo
 	var downloadedPath string
+	var upgradeSuccess bool
 
 	// 当前版本标签
 	ui.NewStatic(dlg,
@@ -229,7 +230,7 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 				downloadedPath = path
 
 				applyUpdate(dlg, dlgCtx, upgrader, downloadedPath, latestInfo.Version,
-					lblStatus, lblProgress, btnUpdate, btnSkip, btnClose, onComplete)
+					lblStatus, lblProgress, btnUpdate, btnSkip, btnClose, onComplete, &upgradeSuccess)
 			})
 		}()
 	})
@@ -248,9 +249,12 @@ func ShowUpgradeDialog(owner ui.Parent, currentVersion string, onComplete func()
 		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
 	})
 
-	// 关闭按钮
+	// 关闭按钮（升级成功后变为重启）
 	btnClose.On().BnClicked(func() {
 		dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
+		if upgradeSuccess {
+			upgrade.RestartApplication()
+		}
 	})
 
 	// 关闭时清理
@@ -266,7 +270,7 @@ func applyUpdate(dlg *ui.Modal, ctx context.Context, upgrader *upgrade.Upgrader,
 	downloadedPath string, version string,
 	lblStatus *ui.Static, lblProgress *ui.Static,
 	btnUpdate *ui.Button, btnSkip *ui.Button, btnClose *ui.Button,
-	onComplete func()) {
+	onComplete func(), success *bool) {
 
 	go func() {
 		err := upgrader.ApplyUpdate(ctx, downloadedPath, version)
@@ -287,15 +291,10 @@ func applyUpdate(dlg *ui.Modal, ctx context.Context, upgrader *upgrade.Upgrader,
 				return
 			}
 
+			*success = true
 			lblStatus.Hwnd().SetWindowText("升级成功！")
 			lblProgress.Hwnd().SetWindowText("请重启程序以使用新版本")
 			btnClose.Hwnd().SetWindowText("重启")
-
-			// 修改关闭按钮行为为重启
-			btnClose.On().BnClicked(func() {
-				dlg.Hwnd().SendMessage(co.WM_CLOSE, 0, 0)
-				upgrade.RestartApplication()
-			})
 
 			if onComplete != nil {
 				onComplete()
@@ -313,7 +312,7 @@ func showConfigureReleaseURLDialog(owner ui.Parent, cfg *config.Config) string {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("配置升级服务").
-			Size(ui.Dpi(420, 190)).
+			Size(ui.Dpi(420, 155)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 
@@ -428,7 +427,7 @@ func ShowUpgradeSettingsDialog(owner ui.Parent) {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("升级设置").
-			Size(ui.Dpi(400, 250)).
+			Size(ui.Dpi(400, 215)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 

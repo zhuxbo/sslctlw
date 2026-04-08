@@ -252,12 +252,16 @@ func runUpgrade(args []string) {
 	}
 
 	upgradeCfg := cfg.GetUpgradeConfig()
+	defaultCfg := upgrade.DefaultConfig()
 	uCfg := &upgrade.Config{
-		Enabled:       upgradeCfg.Enabled,
-		Channel:       upgrade.Channel(upgradeCfg.Channel),
-		CheckInterval: upgradeCfg.CheckInterval,
-		LastCheck:     upgradeCfg.LastCheck,
-		ReleaseURL:    upgradeCfg.ReleaseURL,
+		Enabled:        upgradeCfg.Enabled,
+		Channel:        upgrade.Channel(upgradeCfg.Channel),
+		CheckInterval:  upgradeCfg.CheckInterval,
+		LastCheck:      upgradeCfg.LastCheck,
+		ReleaseURL:     upgradeCfg.ReleaseURL,
+		TrustedOrg:     defaultCfg.TrustedOrg,
+		TrustedCountry: defaultCfg.TrustedCountry,
+		TrustedCAs:     defaultCfg.TrustedCAs,
 	}
 	upgrader := upgrade.NewUpgrader(uCfg)
 
@@ -362,6 +366,7 @@ func printUsage() {
   sslctlw setup --url <url> --token <token>
   sslctlw setup --url <url> --token <token> --order <id>
   sslctlw setup --url <url> --token <token> --order "123,456"
+  sslctlw setup --url <url> --token <token> --key key.pem
 
 扫描:
   sslctlw scan

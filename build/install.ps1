@@ -20,6 +20,9 @@ param(
 
 #Requires -RunAsAdministrator
 $ErrorActionPreference = "Stop"
+# 全局禁用 Invoke-WebRequest / Invoke-RestMethod 的进度条
+# 在脚本级别设置，避免函数作用域导致 PowerShell 5.1 进度条仍然渲染覆盖控制台输出
+$ProgressPreference = 'SilentlyContinue'
 
 # 强制启用 TLS 1.2（PowerShell 5.1 默认仅 SSL3/TLS 1.0，无法连接现代 HTTPS 服务）
 try {
@@ -150,9 +153,7 @@ function Get-TargetVersion {
     $releaseInfo = $null
     $releaseUrl = "$BaseUrl/releases.json"
     try {
-        $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
         $releaseInfo = Invoke-RestMethod -Uri $releaseUrl -TimeoutSec 30 -ErrorAction Stop
-        $ProgressPreference = $prevPref
     } catch {
         Write-NetworkError -ErrorMessage $_.Exception.Message -Url $releaseUrl
         if (-not $RequestedVersion) { return $null }
@@ -219,9 +220,7 @@ function Download-Package {
     param([string]$Url, [string]$OutFile)
 
     try {
-        $prevPref = $ProgressPreference; $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 120 -ErrorAction Stop
-        $ProgressPreference = $prevPref
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -TimeoutSec 120 -UseBasicParsing -ErrorAction Stop
         return $true
     } catch {
         Write-NetworkError -ErrorMessage $_.Exception.Message -Url $Url
@@ -303,10 +302,11 @@ if ($CurrentVersion) {
 # 产物文件名: {product}-{os}-{arch}.{ext}（spec 8.1，版本在目录路径中体现）
 $ArtifactName = "sslctlw-windows-amd64.exe"
 
-# 下载
+# 下载到临时文件（避免覆盖正在运行的 exe 导致失败）
+$TempExe = "$env:TEMP\$ArtifactName"
 $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
 Write-Info "下载 $ArtifactName..."
-$downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
+$downloaded = Download-Package -Url $DownloadUrl -OutFile $TempExe
 
 # 下载失败时提示输入新的升级域名
 while (-not $downloaded) {
@@ -319,7 +319,7 @@ while (-not $downloaded) {
     $ReleaseUrl = Build-ReleaseUrl $newHost
     $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
     Write-Info "重试下载: $DownloadUrl"
-    $downloaded = Download-Package -Url $DownloadUrl -OutFile $ExePath
+    $downloaded = Download-Package -Url $DownloadUrl -OutFile $TempExe
 }
 
 # SHA256 校验（spec 6.4）
@@ -327,18 +327,37 @@ $ExpectedChecksum = $targetInfo.Checksum
 if ($ExpectedChecksum -and $ExpectedChecksum.StartsWith("sha256:")) {
     Write-Info "SHA256 校验..."
     $expectedHash = $ExpectedChecksum.Substring(7)
-    $actualHash = (Get-FileHash -Path $ExePath -Algorithm SHA256).Hash
+    $actualHash = (Get-FileHash -Path $TempExe -Algorithm SHA256).Hash
     if ($actualHash -ine $expectedHash) {
         Write-Err "SHA256 校验失败"
         Write-Err "  期望: $expectedHash"
         Write-Err "  实际: $actualHash"
-        Remove-Item $ExePath -Force -ErrorAction SilentlyContinue
+        Remove-Item $TempExe -Force -ErrorAction SilentlyContinue
         exit 1
     }
     Write-Info "SHA256 校验通过"
 } else {
     Write-Warn "未获取到校验值，跳过 SHA256 校验"
 }
+
+# 替换 exe（Windows 上运行中的 exe 无法覆盖，先重命名旧文件）
+if (Test-Path $ExePath) {
+    # 停止可能运行的 sslctlw 进程
+    Get-Process -Name "sslctlw" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+
+    $oldExe = "$ExePath.old"
+    Remove-Item $oldExe -Force -ErrorAction SilentlyContinue
+    try {
+        Rename-Item $ExePath $oldExe -Force -ErrorAction Stop
+    } catch {
+        Write-Err "无法替换 sslctlw.exe，可能仍在运行"
+        Remove-Item $TempExe -Force -ErrorAction SilentlyContinue
+        exit 1
+    }
+}
+Move-Item $TempExe $ExePath -Force
+Remove-Item "$ExePath.old" -Force -ErrorAction SilentlyContinue
 
 # 写入配置
 $ConfigFile = Join-Path $DataDir "config.json"

@@ -28,9 +28,7 @@ func (d *defaultCertInstaller) SetFriendlyName(thumbprint, friendlyName string) 
 }
 
 // defaultIISBinder 默认 IIS 绑定器
-type defaultIISBinder struct {
-	iis7Mode bool
-}
+type defaultIISBinder struct{}
 
 func (d *defaultIISBinder) BindCertificate(hostname string, port int, certHash string) error {
 	return iis.BindCertificate(hostname, port, certHash)
@@ -42,10 +40,6 @@ func (d *defaultIISBinder) BindCertificateByIP(ip string, port int, certHash str
 
 func (d *defaultIISBinder) FindBindingsForDomains(domains []string) (map[string]*iis.SSLBinding, error) {
 	return iis.FindBindingsForDomains(domains)
-}
-
-func (d *defaultIISBinder) IsIIS7() bool {
-	return d.iis7Mode || iis.IsIIS7()
 }
 
 // defaultOrderStore 默认订单存储包装器
@@ -86,7 +80,7 @@ func DefaultDeployer(cfg *config.Config, store *cert.OrderStore) *Deployer {
 	return &Deployer{
 		Converter: &defaultCertConverter{},
 		Installer: &defaultCertInstaller{},
-		Binder:    &defaultIISBinder{iis7Mode: cfg.IIS7Mode},
+		Binder:    &defaultIISBinder{},
 		Store:     &defaultOrderStore{store: store},
 	}
 }

@@ -64,12 +64,6 @@ func TestGetIISMajorVersion_Live(t *testing.T) {
 	}
 }
 
-// TestIsIIS7_Live 测试 IIS7 检测
-func TestIsIIS7_Live(t *testing.T) {
-	result := IsIIS7()
-	t.Logf("IsIIS7: %v", result)
-}
-
 // TestCheckIISInstalled_Live 测试 IIS 安装检测
 func TestCheckIISInstalled_Live(t *testing.T) {
 	err := CheckIISInstalled()

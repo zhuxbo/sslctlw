@@ -70,12 +70,6 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 		}()
 	}
 
-	// 检测 IIS 版本
-	isIIS7 := d.Binder.IsIIS7()
-	if isIIS7 {
-		log.Println("检测到 IIS7 兼容模式")
-	}
-
 	// 检查域名冲突
 	conflicts := checkDomainConflicts(cfg.Certificates)
 	if len(conflicts) > 0 {
@@ -320,17 +314,6 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 	thumbprint := installResult.Thumbprint
 	log.Printf("证书安装成功: %s", thumbprint)
 
-	// IIS7 处理：修改友好名称
-	isIIS7 := d.Binder.IsIIS7()
-	if isIIS7 && len(certCfg.BindRules) > 0 {
-		wildcardName := cert.GetWildcardName(certCfg.Domain)
-		if err := d.Installer.SetFriendlyName(thumbprint, wildcardName); err != nil {
-			log.Printf("设置友好名称失败: %v", err)
-		} else {
-			log.Printf("已设置友好名称: %s", wildcardName)
-		}
-	}
-
 	// 绑定到 IIS
 	for _, rule := range certCfg.BindRules {
 		// 检查是否有域名冲突，如果有则检查是否应该使用此证书
@@ -349,14 +332,7 @@ func deployCertWithRules(d *Deployer, client APIClient, certData *api.CertData, 
 
 		log.Printf("绑定证书到 %s:%d", rule.Domain, port)
 
-		var bindErr error
-		if isIIS7 {
-			// IIS7 使用 IP:Port 绑定
-			bindErr = d.Binder.BindCertificateByIP("0.0.0.0", port, thumbprint)
-		} else {
-			// IIS8+ 使用 SNI 绑定
-			bindErr = d.Binder.BindCertificate(rule.Domain, port, thumbprint)
-		}
+		bindErr := d.Binder.BindCertificate(rule.Domain, port, thumbprint)
 
 		if bindErr != nil {
 			log.Printf("绑定失败: %v", bindErr)
@@ -835,7 +811,6 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 	}
 
 	// 3. 更新匹配的绑定
-	isIIS7 := d.Binder.IsIIS7()
 	for domain, binding := range matchedBindings {
 		host := iis.ParseHostFromBinding(binding.HostnamePort)
 		port := iis.ParsePortFromBinding(binding.HostnamePort)
@@ -843,7 +818,7 @@ func deployCertAutoMode(d *Deployer, client APIClient, certData *api.CertData, p
 		log.Printf("更新绑定: %s:%d", host, port)
 
 		var bindErr error
-		if isIIS7 || isIPBinding(binding.HostnamePort) {
+		if isIPBinding(binding.HostnamePort) {
 			bindErr = d.Binder.BindCertificateByIP(host, port, thumbprint)
 		} else {
 			bindErr = d.Binder.BindCertificate(host, port, thumbprint)

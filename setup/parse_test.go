@@ -4,12 +4,13 @@ import "testing"
 
 func TestParseCommand(t *testing.T) {
 	tests := []struct {
-		name      string
-		input     string
-		wantURL   string
-		wantToken string
-		wantOrder string
-		wantErr   bool
+		name        string
+		input       string
+		wantURL     string
+		wantToken   string
+		wantOrder   string
+		wantKeyPath string
+		wantErr     bool
 	}{
 		{
 			name:      "完整命令",
@@ -79,6 +80,36 @@ func TestParseCommand(t *testing.T) {
 			input:   "sslctlw setup --url",
 			wantErr: true,
 		},
+		{
+			name:        "带 key",
+			input:       "sslctlw setup --url https://api.example.com --token abc123 --key /path/to/key.pem",
+			wantURL:     "https://api.example.com",
+			wantToken:   "abc123",
+			wantKeyPath: "/path/to/key.pem",
+		},
+		{
+			name:    "key 无值",
+			input:   "sslctlw setup --url https://api.example.com --token abc123 --key",
+			wantErr: true,
+		},
+		{
+			name:      "URL 格式带 order",
+			input:     "https://www.cnssl.com/api/deploy?token=abc123&order=12345",
+			wantURL:   "https://www.cnssl.com/api/deploy",
+			wantToken: "abc123",
+			wantOrder: "12345",
+		},
+		{
+			name:      "URL 格式无 order",
+			input:     "https://www.cnssl.com/api/deploy?token=abc123",
+			wantURL:   "https://www.cnssl.com/api/deploy",
+			wantToken: "abc123",
+		},
+		{
+			name:    "URL 格式缺少 token",
+			input:   "https://www.cnssl.com/api/deploy?order=12345",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -101,6 +132,9 @@ func TestParseCommand(t *testing.T) {
 			}
 			if opts.Order != tt.wantOrder {
 				t.Errorf("Order = %q, want %q", opts.Order, tt.wantOrder)
+			}
+			if opts.KeyPath != tt.wantKeyPath {
+				t.Errorf("KeyPath = %q, want %q", opts.KeyPath, tt.wantKeyPath)
 			}
 		})
 	}

@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log"
@@ -17,8 +18,29 @@ import (
 // ProgressFunc 进度回调
 type ProgressFunc func(step, total int, message string)
 
+// PromptKeyFunc 交互回调：请求用户提供私钥 PEM
+// domain: 证书主域名（用于提示）
+// certPEM: 证书内容（用于显示信息或验证）
+// 返回私钥 PEM 内容，空字符串表示用户跳过
+type PromptKeyFunc func(domain string, certPEM string) string
+
+// RunResult 部署汇总结果
+type RunResult struct {
+	Installed int
+	Skipped   int
+	Failed    int
+	NeedKey   int
+}
+
+// needKeyCert 需要私钥的证书信息（阶段 2 使用）
+type needKeyCert struct {
+	certData     api.CertData
+	serialNumber string
+}
+
 // Run 执行一键部署
-func Run(opts Options, progress ProgressFunc) error {
+// promptKey 可选：提供时在需要私钥时交互提示用户，nil 则跳过交互
+func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResult, error) {
 	totalSteps := 7
 	step := 0
 
@@ -34,7 +56,7 @@ func Run(opts Options, progress ProgressFunc) error {
 	report("校验参数...")
 	allowed, reason := api.IsAllowedAPIURL(opts.URL)
 	if !allowed {
-		return fmt.Errorf("API 地址不合法: %s", reason)
+		return nil, fmt.Errorf("API 地址不合法: %s", reason)
 	}
 
 	client := api.NewClient(opts.URL, opts.Token)
@@ -53,11 +75,11 @@ func Run(opts Options, progress ProgressFunc) error {
 		certs, err = client.ListAllCerts(ctx)
 	}
 	if err != nil {
-		return fmt.Errorf("查询证书失败: %w", err)
+		return nil, fmt.Errorf("查询证书失败: %w", err)
 	}
 
 	if len(certs) == 0 {
-		return fmt.Errorf("未找到任何证书")
+		return nil, fmt.Errorf("未找到任何证书")
 	}
 
 	// 3. 过滤 active
@@ -69,80 +91,95 @@ func Run(opts Options, progress ProgressFunc) error {
 		}
 	}
 	if len(activeCerts) == 0 {
-		return fmt.Errorf("没有 active 状态的证书（共查询到 %d 个）", len(certs))
+		return nil, fmt.Errorf("没有 active 状态的证书（共查询到 %d 个）", len(certs))
 	}
 	log.Printf("[setup] 找到 %d 个有效证书", len(activeCerts))
 
-	// 4. 逐个安装
+	// 4. 阶段 1：批量安装（优先级 1-3，不交互）
 	report(fmt.Sprintf("开始安装 %d 个证书...", len(activeCerts)))
-	var installed int
-	var skipped int
-	var failed int
+	result := &RunResult{}
 	var certConfigs []config.CertConfig
+	var needKeys []needKeyCert
 
 	for _, certData := range activeCerts {
-		// 检查是否已存在
+		// 优先级 3：检查是否已在 Windows 证书存储中
 		serialNumber, _ := cert.GetCertSerialNumber(certData.Certificate)
 		if serialNumber != "" {
 			exists, _, _ := cert.IsCertExists(serialNumber)
 			if exists {
 				log.Printf("证书 %s 已存在，跳过安装", certData.Domain())
-				skipped++
-				// 仍然添加配置
+				result.Skipped++
 				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				continue
 			}
 		}
 
-		// PEM → PFX
-		pfxPath, err := cert.PEMToPFX(certData.Certificate, certData.PrivateKey, certData.CACert, "")
-		if err != nil {
-			log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
-			failed++
+		// 优先级 1-2：尝试获取私钥
+		keyPEM, source := resolvePrivateKey(certData.Certificate, certData.PrivateKey, opts.KeyPath)
+		if keyPEM == "" {
+			// 需要私钥，归入阶段 2
+			log.Printf("证书 %s 未找到可用私钥，等待用户提供", certData.Domain())
+			needKeys = append(needKeys, needKeyCert{certData: certData, serialNumber: serialNumber})
 			continue
 		}
 
-		// 安装
-		result, err := cert.InstallPFX(pfxPath, "")
-		os.Remove(pfxPath)
-		if err != nil || !result.Success {
-			errMsg := "安装失败"
-			if err != nil {
-				errMsg = err.Error()
-			} else if result.ErrorMessage != "" {
-				errMsg = result.ErrorMessage
-			}
-			log.Printf("证书 %s 安装失败: %s", certData.Domain(), errMsg)
-			failed++
-			continue
+		log.Printf("证书 %s 使用 %s 私钥", certData.Domain(), source)
+		if ok := installCert(ctx, client, certData, keyPEM, serialNumber, opts, &certConfigs, result); !ok {
+			result.Failed++
 		}
-
-		installed++
-		log.Printf("证书 %s 安装成功: %s", certData.Domain(), result.Thumbprint)
-
-		// 安装后通过 thumbprint 获取准确的序列号
-		if serialNumber == "" {
-			if certInfo, err := cert.GetCertByThumbprint(result.Thumbprint); err == nil {
-				serialNumber = certInfo.SerialNumber
-			}
-		}
-
-		// IIS 绑定
-		bindCertToIIS(certData, result.Thumbprint)
-
-		// 通知服务端续签模式：pull 模式启用自动续签
-		toggleAutoReissue(ctx, client, certData.OrderID, false)
-
-		certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 	}
 
-	// 5. 保存配置
-	report(fmt.Sprintf("保存配置（安装 %d, 跳过 %d, 失败 %d）...", installed, skipped, failed))
+	// 阶段 1 汇总
+	result.NeedKey = len(needKeys)
+	if len(needKeys) > 0 {
+		var names []string
+		for _, nk := range needKeys {
+			names = append(names, nk.certData.Domain())
+		}
+		log.Printf("[setup] 需要私钥的证书: %s", strings.Join(names, ", "))
+	}
+
+	// 5. 阶段 2：交互获取私钥
+	if len(needKeys) > 0 && promptKey != nil {
+		report(fmt.Sprintf("等待用户提供私钥（%d 个证书）...", len(needKeys)))
+		for i, nk := range needKeys {
+			log.Printf("[setup] 请求私钥 (%d/%d): %s", i+1, len(needKeys), nk.certData.Domain())
+			keyPEM := promptKey(nk.certData.Domain(), nk.certData.Certificate)
+			if keyPEM == "" {
+				log.Printf("证书 %s 用户跳过", nk.certData.Domain())
+				continue
+			}
+
+			// 验证私钥与证书匹配
+			matched, err := cert.VerifyKeyPair(nk.certData.Certificate, keyPEM)
+			if err != nil {
+				log.Printf("证书 %s 私钥验证失败: %v", nk.certData.Domain(), err)
+				result.Failed++
+				result.NeedKey--
+				continue
+			}
+			if !matched {
+				log.Printf("证书 %s 私钥与证书不匹配", nk.certData.Domain())
+				result.Failed++
+				result.NeedKey--
+				continue
+			}
+
+			if ok := installCert(ctx, client, nk.certData, keyPEM, nk.serialNumber, opts, &certConfigs, result); !ok {
+				result.Failed++
+			}
+			result.NeedKey--
+		}
+	}
+
+	// 6. 保存配置
+	report(fmt.Sprintf("保存配置（安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d）...",
+		result.Installed, result.Skipped, result.Failed, result.NeedKey))
 	if err := saveSetupConfig(certConfigs); err != nil {
 		log.Printf("警告: 保存配置失败: %v", err)
 	}
 
-	// 6. 创建计划任务
+	// 7. 创建计划任务
 	report("创建计划任务...")
 	taskName := config.DefaultTaskName
 	if err := util.CreateTask(taskName); err != nil {
@@ -151,14 +188,108 @@ func Run(opts Options, progress ProgressFunc) error {
 		log.Printf("计划任务已创建: %s", taskName)
 	}
 
-	// 7. 完成
-	report(fmt.Sprintf("完成: 安装 %d, 跳过 %d, 失败 %d", installed, skipped, failed))
+	// 完成
+	report(fmt.Sprintf("完成: 安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d",
+		result.Installed, result.Skipped, result.Failed, result.NeedKey))
 
-	if failed > 0 {
-		return fmt.Errorf("部分证书部署失败: 安装 %d, 跳过 %d, 失败 %d", installed, skipped, failed)
+	if result.Failed > 0 || result.NeedKey > 0 {
+		return result, fmt.Errorf("部分证书部署未完成: 安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d",
+			result.Installed, result.Skipped, result.Failed, result.NeedKey)
 	}
 
-	return nil
+	return result, nil
+}
+
+// installCert 安装单个证书（PEM→PFX→安装→绑定→通知）
+// 成功返回 true 并更新 result.Installed 和 certConfigs
+func installCert(ctx context.Context, client *api.Client, certData api.CertData, keyPEM string, serialNumber string, opts Options, certConfigs *[]config.CertConfig, result *RunResult) bool {
+	pfxPath, err := cert.PEMToPFX(certData.Certificate, keyPEM, certData.CACert, "")
+	if err != nil {
+		log.Printf("证书 %s 转换失败: %v", certData.Domain(), err)
+		return false
+	}
+
+	installResult, err := cert.InstallPFX(pfxPath, "")
+	os.Remove(pfxPath)
+	if err != nil || !installResult.Success {
+		errMsg := "安装失败"
+		if err != nil {
+			errMsg = err.Error()
+		} else if installResult.ErrorMessage != "" {
+			errMsg = installResult.ErrorMessage
+		}
+		log.Printf("证书 %s 安装失败: %s", certData.Domain(), errMsg)
+		return false
+	}
+
+	result.Installed++
+	log.Printf("证书 %s 安装成功: %s", certData.Domain(), installResult.Thumbprint)
+
+	// 安装后通过 thumbprint 获取准确的序列号
+	if serialNumber == "" {
+		if certInfo, err := cert.GetCertByThumbprint(installResult.Thumbprint); err == nil {
+			serialNumber = certInfo.SerialNumber
+		}
+	}
+
+	// IIS 绑定
+	bindCertToIIS(certData, installResult.Thumbprint)
+
+	// 通知服务端续签模式：pull 模式启用自动续签
+	toggleAutoReissue(ctx, client, certData.OrderID, false)
+
+	*certConfigs = append(*certConfigs, makeCertConfig(certData, opts, serialNumber))
+	return true
+}
+
+// resolvePrivateKey 按优先级尝试获取私钥（不含交互）
+// 返回：私钥 PEM, 来源描述
+func resolvePrivateKey(certPEM string, apiKey string, keyPath string) (string, string) {
+	// 优先级 1：API 返回的 private_key
+	if apiKey != "" {
+		if len(apiKey) > cert.MaxPrivateKeySize {
+			log.Printf("API 私钥大小超限，跳过")
+		} else if matched, err := cert.VerifyKeyPair(certPEM, apiKey); err != nil {
+			log.Printf("API 私钥验证失败: %v", err)
+		} else if !matched {
+			log.Printf("API 私钥与证书不匹配")
+		} else {
+			return apiKey, "API"
+		}
+	}
+
+	// 优先级 2：指定的私钥文件路径
+	if keyPath != "" {
+		keyPEM, err := readKeyFile(keyPath)
+		if err != nil {
+			log.Printf("读取私钥文件失败: %v", err)
+		} else if matched, err := cert.VerifyKeyPair(certPEM, keyPEM); err != nil {
+			log.Printf("文件私钥验证失败: %v", err)
+		} else if !matched {
+			log.Printf("文件私钥与证书不匹配")
+		} else {
+			return keyPEM, "文件"
+		}
+	}
+
+	// 优先级 3（IsCertExists）在外层已处理
+	return "", ""
+}
+
+// readKeyFile 读取私钥文件（带大小限制）
+func readKeyFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("私钥文件不存在: %w", err)
+	}
+	if info.Size() > int64(cert.MaxPrivateKeySize) {
+		return "", fmt.Errorf("私钥文件大小 %d 超过上限 %d", info.Size(), cert.MaxPrivateKeySize)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("读取私钥文件失败: %w", err)
+	}
+	return string(data), nil
 }
 
 // bindCertToIIS 将证书绑定到 IIS 匹配的站点
@@ -266,7 +397,31 @@ func RunCLI(args []string) error {
 		return err
 	}
 
-	return Run(*opts, func(step, total int, message string) {
+	// CLI 交互回调：提示用户输入私钥文件路径
+	promptKey := func(domain string, certPEM string) string {
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Printf("\n证书 %s 需要私钥。\n", domain)
+		fmt.Print("请输入私钥文件路径（留空跳过）: ")
+		path, _ := reader.ReadString('\n')
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return ""
+		}
+		keyPEM, err := readKeyFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读取失败: %v\n", err)
+			return ""
+		}
+		return keyPEM
+	}
+
+	result, err := Run(*opts, func(step, total int, message string) {
 		fmt.Printf("[%d/%d] %s\n", step, total, message)
-	})
+	}, promptKey)
+
+	if result != nil && result.NeedKey > 0 {
+		fmt.Printf("\n以下证书仍需要私钥，请使用 --key 指定私钥文件或在 GUI 中操作。\n")
+	}
+
+	return err
 }

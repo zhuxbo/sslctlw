@@ -16,7 +16,7 @@ func ShowInstallDialog(owner ui.Parent, onSuccess func()) {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("导入证书").
-			Size(ui.Dpi(500, 200)).
+			Size(ui.Dpi(500, 165)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 	logDebug("ShowInstallDialog: modal created")

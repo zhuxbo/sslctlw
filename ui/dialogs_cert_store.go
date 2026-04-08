@@ -19,7 +19,7 @@ func ShowCertStoreDialog(owner ui.Parent, onSuccess func()) {
 	dlg := ui.NewModal(owner,
 		ui.OptsModal().
 			Title("管理证书").
-			Size(ui.Dpi(700, 420)).
+			Size(ui.Dpi(700, 368)).
 			Style(co.WS_CAPTION|co.WS_SYSMENU|co.WS_POPUP|co.WS_VISIBLE),
 	)
 

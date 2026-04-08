@@ -415,15 +415,6 @@ func TestMockIISBinder(t *testing.T) {
 		}
 	})
 
-	t.Run("IIS7 检测", func(t *testing.T) {
-		binder := &MockIISBinder{
-			IsIIS7Func: func() bool { return true },
-		}
-
-		if !binder.IsIIS7() {
-			t.Error("IsIIS7() 应该返回 true")
-		}
-	})
 }
 
 // TestMockAPIClient 测试 Mock API 客户端
@@ -710,43 +701,6 @@ func TestDeployCertWithRules(t *testing.T) {
 		// 第二个应该成功
 		if !results[1].Success {
 			t.Errorf("第二个域名期望成功，得到失败: %s", results[1].Message)
-		}
-	})
-
-	t.Run("IIS7模式", func(t *testing.T) {
-		d := NewMockDeployer()
-		d.Binder.(*MockIISBinder).IsIIS7Func = func() bool { return true }
-
-		bindByIPCalled := false
-		d.Binder.(*MockIISBinder).BindCertificateByIPFunc = func(ip string, port int, certHash string) error {
-			bindByIPCalled = true
-			if ip != "0.0.0.0" {
-				t.Errorf("期望 IP 为 0.0.0.0，得到 %s", ip)
-			}
-			return nil
-		}
-
-		sniCalled := false
-		d.Binder.(*MockIISBinder).BindCertificateFunc = func(hostname string, port int, certHash string) error {
-			sniCalled = true
-			return nil
-		}
-
-		certData := makeTestCertData(100, "example.com", "active", "2025-12-31")
-		certCfg := makeTestCertConfig(100, "example.com", true)
-		conflicts := map[string][]int{}
-		allCerts := []config.CertConfig{certCfg}
-
-		results := deployCertWithRules(d, NewMockClient(), certData, testKeyPEM, certCfg, conflicts, allCerts)
-
-		if !bindByIPCalled {
-			t.Error("IIS7 模式下应该调用 BindCertificateByIP")
-		}
-		if sniCalled {
-			t.Error("IIS7 模式下不应该调用 BindCertificate (SNI)")
-		}
-		if len(results) != 1 || !results[0].Success {
-			t.Errorf("期望 1 个成功结果，得到 %d 个", len(results))
 		}
 	})
 

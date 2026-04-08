@@ -13,36 +13,27 @@ import (
 var (
 	wintrust           = syscall.NewLazyDLL("wintrust.dll")
 	crypt32            = syscall.NewLazyDLL("crypt32.dll")
-	procWinVerifyTrust = wintrust.NewProc("WinVerifyTrust")
-	procCryptQueryObject = crypt32.NewProc("CryptQueryObject")
-	procCertGetNameStringW = crypt32.NewProc("CertGetNameStringW")
-	procCertFreeCertificateContext = crypt32.NewProc("CertFreeCertificateContext")
-	procCryptMsgClose = crypt32.NewProc("CryptMsgClose")
-	procCertCloseStore = crypt32.NewProc("CertCloseStore")
-	procCryptMsgGetParam = crypt32.NewProc("CryptMsgGetParam")
-	procCertFindCertificateInStore = crypt32.NewProc("CertFindCertificateInStore")
+	procWinVerifyTrust                 = wintrust.NewProc("WinVerifyTrust")
+	procWTHelperProvDataFromStateData  = wintrust.NewProc("WTHelperProvDataFromStateData")
+	procWTHelperGetProvSignerFromChain = wintrust.NewProc("WTHelperGetProvSignerFromChain")
+	procWTHelperGetProvCertFromChain   = wintrust.NewProc("WTHelperGetProvCertFromChain")
+	procCertGetNameStringW             = crypt32.NewProc("CertGetNameStringW")
 )
 
 // Windows 常量
 const (
-	INVALID_HANDLE_VALUE          = ^uintptr(0)
-	WTD_UI_NONE                   = 2
-	WTD_REVOKE_NONE               = 0
-	WTD_REVOKE_WHOLECHAIN         = 1
-	WTD_CHOICE_FILE               = 1
-	WTD_STATEACTION_VERIFY        = 1
-	WTD_STATEACTION_CLOSE         = 2
-	TRUST_E_NOSIGNATURE           = 0x800B0100
-	TRUST_E_SUBJECT_NOT_TRUSTED   = 0x800B0004
-	TRUST_E_PROVIDER_UNKNOWN      = 0x800B0001
-	CERT_QUERY_OBJECT_FILE        = 1
-	CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED = 1 << 10
-	CERT_QUERY_FORMAT_FLAG_BINARY = 1 << 1
-	CMSG_SIGNER_INFO_PARAM        = 6
-	CERT_FIND_SUBJECT_CERT        = 0x00020007
+	INVALID_HANDLE_VALUE        = ^uintptr(0)
+	WTD_UI_NONE                 = 2
+	WTD_REVOKE_NONE             = 0
+	WTD_REVOKE_WHOLECHAIN       = 1
+	WTD_CHOICE_FILE             = 1
+	WTD_STATEACTION_VERIFY      = 1
+	WTD_STATEACTION_CLOSE       = 2
+	TRUST_E_NOSIGNATURE         = 0x800B0100
+	TRUST_E_SUBJECT_NOT_TRUSTED = 0x800B0004
+	TRUST_E_PROVIDER_UNKNOWN    = 0x800B0001
 	CERT_NAME_SIMPLE_DISPLAY_TYPE = 4
 	CERT_NAME_ATTR_TYPE           = 3
-	szOID_COMMON_NAME             = "2.5.4.3"
 	szOID_ORGANIZATION_NAME       = "2.5.4.10"
 	szOID_COUNTRY_NAME            = "2.5.4.6"
 )
@@ -80,54 +71,19 @@ type WINTRUST_DATA struct {
 	pSignatureSettings  uintptr
 }
 
-// CMSG_SIGNER_INFO 结构
-type CMSG_SIGNER_INFO struct {
-	dwVersion                   uint32
-	Issuer                      CRYPT_DATA_BLOB
-	SerialNumber                CRYPT_DATA_BLOB
-	HashAlgorithm               CRYPT_ALGORITHM_IDENTIFIER
-	HashEncryptionAlgorithm     CRYPT_ALGORITHM_IDENTIFIER
-	EncryptedHash               CRYPT_DATA_BLOB
-	AuthAttrs                   CRYPT_ATTRIBUTES
-	UnauthAttrs                 CRYPT_ATTRIBUTES
-}
-
-type CRYPT_DATA_BLOB struct {
-	cbData uint32
-	pbData *byte
-}
-
-type CRYPT_ALGORITHM_IDENTIFIER struct {
-	pszObjId   *byte
-	Parameters CRYPT_DATA_BLOB
-}
-
-type CRYPT_ATTRIBUTES struct {
-	cAttr  uint32
-	rgAttr uintptr
-}
-
-type CERT_INFO struct {
-	dwVersion            uint32
-	SerialNumber         CRYPT_DATA_BLOB
-	SignatureAlgorithm   CRYPT_ALGORITHM_IDENTIFIER
-	Issuer               CRYPT_DATA_BLOB
-	NotBefore            syscall.Filetime
-	NotAfter             syscall.Filetime
-	Subject              CRYPT_DATA_BLOB
-	SubjectPublicKeyInfo uintptr // 简化
-	IssuerUniqueId       CRYPT_DATA_BLOB
-	SubjectUniqueId      CRYPT_DATA_BLOB
-	cExtension           uint32
-	rgExtension          uintptr
-}
-
+// CERT_CONTEXT Windows 证书上下文
 type CERT_CONTEXT struct {
 	dwCertEncodingType uint32
 	pbCertEncoded      *byte
 	cbCertEncoded      uint32
-	pCertInfo          *CERT_INFO
+	pCertInfo          uintptr
 	hCertStore         syscall.Handle
+}
+
+// CRYPT_PROVIDER_CERT WinVerifyTrust 提供者证书结构（仅定义需要的字段）
+type CRYPT_PROVIDER_CERT struct {
+	cbStruct uint32
+	pCert    *CERT_CONTEXT
 }
 
 // AuthenticodeVerifier Authenticode 签名验证器
@@ -144,16 +100,10 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 		Valid: false,
 	}
 
-	// 1. 验证 Authenticode 签名有效性
-	if err := v.verifySignature(filePath); err != nil {
-		result.Message = fmt.Sprintf("签名验证失败: %v", err)
-		return result, nil
-	}
-
-	// 2. 获取签名证书信息
-	certInfo, err := v.getCertificateInfo(filePath)
+	// 验证签名并提取证书信息（合并执行，避免分离导致的证书查找失败）
+	certInfo, err := v.verifyAndExtractCert(filePath)
 	if err != nil {
-		result.Message = fmt.Sprintf("获取证书信息失败: %v", err)
+		result.Message = err.Error()
 		return result, nil
 	}
 
@@ -169,7 +119,7 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 		return result, nil
 	}
 
-	// 3. 验证组织名称（必须配置，防止未注入 buildTrustedOrg 时绕过验证）
+	// 验证组织名称（必须配置，防止未注入 buildTrustedOrg 时绕过验证）
 	if config.TrustedOrg == "" {
 		result.Valid = false
 		result.Message = "安全配置错误: 未配置可信组织名称（buildTrustedOrg 未注入）"
@@ -181,7 +131,7 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 		return result, nil
 	}
 
-	// 4. 验证国家代码
+	// 验证国家代码
 	if config.TrustedCountry != "" {
 		if !strings.EqualFold(certInfo.country, config.TrustedCountry) {
 			result.Valid = false
@@ -190,7 +140,7 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 		}
 	}
 
-	// 5. 验证 CA
+	// 验证 CA
 	if len(config.TrustedCAs) > 0 {
 		caMatched := false
 		for _, ca := range config.TrustedCAs {
@@ -211,73 +161,121 @@ func (v *AuthenticodeVerifier) Verify(filePath string, config *VerifyConfig) (*V
 	return result, nil
 }
 
-// verifySignature 使用 WinVerifyTrust 验证签名
-// 先尝试全链吊销检查，失败后降级为不检查吊销（兼容离线环境）
-func (v *AuthenticodeVerifier) verifySignature(filePath string) error {
-	// 先尝试带吊销检查的验证
-	err := v.winVerifyTrust(filePath, WTD_REVOKE_WHOLECHAIN)
-	if err != nil {
-		// 吊销检查失败（可能离线），降级为不检查吊销
-		fallbackErr := v.winVerifyTrust(filePath, WTD_REVOKE_NONE)
-		if fallbackErr != nil {
-			return fallbackErr
-		}
-		// 签名有效但吊销检查失败，记录日志继续
-		fmt.Printf("警告: 证书吊销检查失败（%v），已跳过吊销检查\n", err)
-	}
-	return nil
-}
-
-// winVerifyTrust 调用 WinVerifyTrust API
-func (v *AuthenticodeVerifier) winVerifyTrust(filePath string, revokeCheck uint32) error {
+// verifyAndExtractCert 验证签名并从 WinVerifyTrust 状态数据中提取证书信息
+// 合并 verifySignature + getCertificateInfo，解决证书未嵌入 PKCS7 导致的查找失败
+func (v *AuthenticodeVerifier) verifyAndExtractCert(filePath string) (*certificateInfo, error) {
 	filePathPtr, err := syscall.UTF16PtrFromString(filePath)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("签名验证失败: %v", err)
 	}
 
 	fileInfo := WINTRUST_FILE_INFO{
 		cbStruct:      uint32(unsafe.Sizeof(WINTRUST_FILE_INFO{})),
 		pcwszFilePath: filePathPtr,
-		hFile:         0,
 	}
 
 	trustData := WINTRUST_DATA{
 		cbStruct:            uint32(unsafe.Sizeof(WINTRUST_DATA{})),
 		dwUIChoice:          WTD_UI_NONE,
-		fdwRevocationChecks: revokeCheck,
+		fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
 		dwUnionChoice:       WTD_CHOICE_FILE,
 		pFile:               &fileInfo,
 		dwStateAction:       WTD_STATEACTION_VERIFY,
 	}
 
+	closeTrust := func() {
+		trustData.dwStateAction = WTD_STATEACTION_CLOSE
+		procWinVerifyTrust.Call(
+			INVALID_HANDLE_VALUE,
+			uintptr(unsafe.Pointer(&WINTRUST_ACTION_GENERIC_VERIFY_V2)),
+			uintptr(unsafe.Pointer(&trustData)),
+		)
+	}
+
+	// 先尝试带吊销检查的验证
 	ret, _, _ := procWinVerifyTrust.Call(
 		INVALID_HANDLE_VALUE,
 		uintptr(unsafe.Pointer(&WINTRUST_ACTION_GENERIC_VERIFY_V2)),
 		uintptr(unsafe.Pointer(&trustData)),
 	)
 
-	// 清理状态
-	trustData.dwStateAction = WTD_STATEACTION_CLOSE
-	procWinVerifyTrust.Call(
-		INVALID_HANDLE_VALUE,
-		uintptr(unsafe.Pointer(&WINTRUST_ACTION_GENERIC_VERIFY_V2)),
-		uintptr(unsafe.Pointer(&trustData)),
-	)
-
 	if ret != 0 {
-		switch ret {
-		case TRUST_E_NOSIGNATURE:
-			return fmt.Errorf("文件未签名")
-		case TRUST_E_SUBJECT_NOT_TRUSTED:
-			return fmt.Errorf("签名者不受信任")
-		case TRUST_E_PROVIDER_UNKNOWN:
-			return fmt.Errorf("未知的信任提供程序")
-		default:
-			return fmt.Errorf("签名验证失败: 0x%X", ret)
+		// 吊销检查失败，降级为不检查吊销
+		closeTrust()
+
+		trustData.fdwRevocationChecks = WTD_REVOKE_NONE
+		trustData.dwStateAction = WTD_STATEACTION_VERIFY
+
+		ret, _, _ = procWinVerifyTrust.Call(
+			INVALID_HANDLE_VALUE,
+			uintptr(unsafe.Pointer(&WINTRUST_ACTION_GENERIC_VERIFY_V2)),
+			uintptr(unsafe.Pointer(&trustData)),
+		)
+
+		if ret != 0 {
+			closeTrust()
+			switch ret {
+			case TRUST_E_NOSIGNATURE:
+				return nil, fmt.Errorf("签名验证失败: 文件未签名")
+			case TRUST_E_SUBJECT_NOT_TRUSTED:
+				return nil, fmt.Errorf("签名验证失败: 签名者不受信任")
+			case TRUST_E_PROVIDER_UNKNOWN:
+				return nil, fmt.Errorf("签名验证失败: 未知的信任提供程序")
+			default:
+				return nil, fmt.Errorf("签名验证失败: 0x%X", ret)
+			}
 		}
 	}
 
-	return nil
+	// 签名验证通过，从状态数据中提取证书信息
+	certInfo, extractErr := v.extractCertFromState(trustData.hWVTStateData)
+	closeTrust()
+	runtime.KeepAlive(filePathPtr)
+
+	if extractErr != nil {
+		return nil, fmt.Errorf("获取证书信息失败: %v", extractErr)
+	}
+
+	return certInfo, nil
+}
+
+// extractCertFromState 从 WinVerifyTrust 状态数据中提取签名者证书信息
+func (v *AuthenticodeVerifier) extractCertFromState(hStateData syscall.Handle) (*certificateInfo, error) {
+	pProvData, _, _ := procWTHelperProvDataFromStateData.Call(uintptr(hStateData))
+	if pProvData == 0 {
+		return nil, fmt.Errorf("WTHelperProvDataFromStateData 失败")
+	}
+
+	pProvSigner, _, _ := procWTHelperGetProvSignerFromChain.Call(pProvData, 0, 0, 0)
+	if pProvSigner == 0 {
+		return nil, fmt.Errorf("WTHelperGetProvSignerFromChain 失败")
+	}
+
+	pProvCert, _, _ := procWTHelperGetProvCertFromChain.Call(pProvSigner, 0)
+	if pProvCert == 0 {
+		return nil, fmt.Errorf("WTHelperGetProvCertFromChain 失败")
+	}
+
+	provCert := *(**CRYPT_PROVIDER_CERT)(unsafe.Pointer(&pProvCert))
+	if provCert.pCert == nil {
+		return nil, fmt.Errorf("证书上下文为空")
+	}
+
+	info := &certificateInfo{}
+
+	// 计算指纹 (SHA-256)
+	certData := unsafe.Slice(provCert.pCert.pbCertEncoded, provCert.pCert.cbCertEncoded)
+	hash := sha256.Sum256(certData)
+	info.fingerprint = strings.ToUpper(hex.EncodeToString(hash[:]))
+
+	// 获取证书名称信息
+	certCtxPtr := uintptr(unsafe.Pointer(provCert.pCert))
+	info.subject = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, "")
+	info.organization = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_ORGANIZATION_NAME)
+	info.country = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_COUNTRY_NAME)
+	info.issuer = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0x1, "")
+
+	return info, nil
 }
 
 // certificateInfo 证书信息
@@ -287,124 +285,6 @@ type certificateInfo struct {
 	organization string
 	country      string
 	issuer       string
-}
-
-// getCertificateInfo 获取签名证书信息
-func (v *AuthenticodeVerifier) getCertificateInfo(filePath string) (*certificateInfo, error) {
-	filePathPtr, err := syscall.UTF16PtrFromString(filePath)
-	if err != nil {
-		return nil, err
-	}
-
-	var dwEncoding, dwContentType, dwFormatType uint32
-	var hStore, hMsg syscall.Handle
-	var pCertContext *CERT_CONTEXT
-
-	ret, _, err := procCryptQueryObject.Call(
-		CERT_QUERY_OBJECT_FILE,
-		uintptr(unsafe.Pointer(filePathPtr)),
-		CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
-		CERT_QUERY_FORMAT_FLAG_BINARY,
-		0,
-		uintptr(unsafe.Pointer(&dwEncoding)),
-		uintptr(unsafe.Pointer(&dwContentType)),
-		uintptr(unsafe.Pointer(&dwFormatType)),
-		uintptr(unsafe.Pointer(&hStore)),
-		uintptr(unsafe.Pointer(&hMsg)),
-		uintptr(unsafe.Pointer(&pCertContext)),
-	)
-
-	if ret == 0 {
-		return nil, fmt.Errorf("CryptQueryObject 失败: %v", err)
-	}
-
-	defer func() {
-		// 释放 CryptQueryObject 返回的证书上下文
-		if pCertContext != nil {
-			procCertFreeCertificateContext.Call(uintptr(unsafe.Pointer(pCertContext)))
-		}
-		if hStore != 0 {
-			procCertCloseStore.Call(uintptr(hStore), 0)
-		}
-		if hMsg != 0 {
-			procCryptMsgClose.Call(uintptr(hMsg))
-		}
-	}()
-
-	// 获取签名者信息大小
-	var signerInfoSize uint32
-	ret, _, _ = procCryptMsgGetParam.Call(
-		uintptr(hMsg),
-		CMSG_SIGNER_INFO_PARAM,
-		0,
-		0,
-		uintptr(unsafe.Pointer(&signerInfoSize)),
-	)
-
-	if ret == 0 || signerInfoSize == 0 {
-		return nil, fmt.Errorf("获取签名者信息大小失败")
-	}
-
-	// 获取签名者信息
-	signerInfoBuf := make([]byte, signerInfoSize)
-	ret, _, _ = procCryptMsgGetParam.Call(
-		uintptr(hMsg),
-		CMSG_SIGNER_INFO_PARAM,
-		0,
-		uintptr(unsafe.Pointer(&signerInfoBuf[0])),
-		uintptr(unsafe.Pointer(&signerInfoSize)),
-	)
-
-	if ret == 0 {
-		return nil, fmt.Errorf("获取签名者信息失败")
-	}
-
-	signerInfo := (*CMSG_SIGNER_INFO)(unsafe.Pointer(&signerInfoBuf[0]))
-
-	// 构造 CERT_INFO 用于查找证书
-	certInfoForSearch := CERT_INFO{
-		Issuer:       signerInfo.Issuer,
-		SerialNumber: signerInfo.SerialNumber,
-	}
-
-	// 在存储中查找证书
-	certCtxPtr, _, _ := procCertFindCertificateInStore.Call(
-		uintptr(hStore),
-		uintptr(0x00000001|0x00010000), // X509_ASN_ENCODING | PKCS_7_ASN_ENCODING
-		0,
-		CERT_FIND_SUBJECT_CERT,
-		uintptr(unsafe.Pointer(&certInfoForSearch)),
-		0,
-	)
-
-	if certCtxPtr == 0 {
-		return nil, fmt.Errorf("未找到签名证书")
-	}
-	defer procCertFreeCertificateContext.Call(certCtxPtr)
-
-	// 通过 &uintptr 取址再解引用，避免 go vet 报 uintptr→unsafe.Pointer 的 misuse 警告
-	// 原理：&certCtxPtr 是合法的 Go 指针，unsafe.Pointer(&certCtxPtr) 符合安全规则，
-	// 再解引用 *(**T) 得到目标指针（uintptr 和 pointer 在内存中大小相同）
-	pCert := *(**CERT_CONTEXT)(unsafe.Pointer(&certCtxPtr))
-
-	// 获取证书信息
-	info := &certificateInfo{}
-
-	// 计算指纹 (SHA-256)
-	// 使用 unsafe.Slice 安全地创建证书数据切片 (Go 1.17+)
-	certData := unsafe.Slice(pCert.pbCertEncoded, pCert.cbCertEncoded)
-	hash := sha256.Sum256(certData)
-	info.fingerprint = strings.ToUpper(hex.EncodeToString(hash[:]))
-
-	// 获取主题名称
-	info.subject = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, "")
-	info.organization = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_ORGANIZATION_NAME)
-	info.country = v.getCertNameString(certCtxPtr, CERT_NAME_ATTR_TYPE, 0, szOID_COUNTRY_NAME)
-
-	// 获取颁发者 (CERT_NAME_ISSUER_FLAG = 0x1)
-	info.issuer = v.getCertNameString(certCtxPtr, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0x1, "")
-
-	return info, nil
 }
 
 // getCertNameString 获取证书名称字符串

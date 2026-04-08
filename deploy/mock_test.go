@@ -211,7 +211,6 @@ type MockIISBinder struct {
 	BindCertificateFunc       func(hostname string, port int, certHash string) error
 	BindCertificateByIPFunc   func(ip string, port int, certHash string) error
 	FindBindingsForDomainsFunc func(domains []string) (map[string]*iis.SSLBinding, error)
-	IsIIS7Func                func() bool
 }
 
 func (m *MockIISBinder) BindCertificate(hostname string, port int, certHash string) error {
@@ -235,12 +234,7 @@ func (m *MockIISBinder) FindBindingsForDomains(domains []string) (map[string]*ii
 	return make(map[string]*iis.SSLBinding), nil
 }
 
-func (m *MockIISBinder) IsIIS7() bool {
-	if m.IsIIS7Func != nil {
-		return m.IsIIS7Func()
-	}
-	return false
-}
+
 
 // NewMockDeployer 创建用于测试的 Mock 部署器
 func NewMockDeployer() *Deployer {
