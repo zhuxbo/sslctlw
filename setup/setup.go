@@ -294,7 +294,7 @@ func readKeyFile(path string) (string, error) {
 
 // bindCertToIIS 将证书绑定到 IIS 匹配的站点
 func bindCertToIIS(certData api.CertData, thumbprint string) {
-	allDomains := certData.GetDomainList()
+	allDomains := extractDomainsWithFallback(certData)
 	if len(allDomains) == 0 && certData.Domain() != "" {
 		allDomains = []string{certData.Domain()}
 	}
@@ -333,11 +333,14 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 	certAPI := config.CertAPIConfig{URL: opts.URL}
 	certAPI.SetToken(opts.Token)
 
+	// 优先从证书 PEM 提取域名（包含完整 SAN），API 数据作为回退
+	domains := extractDomainsWithFallback(certData)
+
 	return config.CertConfig{
 		CertName:     fmt.Sprintf("%s-%d", certData.Domain(), certData.OrderID),
 		OrderID:      certData.OrderID,
 		Domain:       certData.Domain(),
-		Domains:      certData.GetDomainList(),
+		Domains:      domains,
 		Enabled:      true,
 		AutoBindMode: true,
 		BindRules:    []config.BindRule{},
@@ -347,6 +350,17 @@ func makeCertConfig(certData api.CertData, opts Options, serialNumber string) co
 			CertSerial:    serialNumber,
 		},
 	}
+}
+
+// extractDomainsWithFallback 优先从证书 PEM 提取域名，失败则回退到 API 数据
+func extractDomainsWithFallback(certData api.CertData) []string {
+	if certData.Certificate != "" {
+		domains, err := cert.ExtractDomainsFromPEM(certData.Certificate)
+		if err == nil && len(domains) > 0 {
+			return domains
+		}
+	}
+	return certData.GetDomainList()
 }
 
 // saveSetupConfig 保存 setup 生成的证书配置
