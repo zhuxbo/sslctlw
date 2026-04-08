@@ -139,7 +139,7 @@ func DefaultConfig() *Config {
 		// 安全配置（编译时通过 ldflags 注入）
 		TrustedOrg:     buildTrustedOrg,
 		TrustedCountry: country,
-		TrustedCAs:     []string{"DigiCert", "Sectigo", "GlobalSign"}, // 常见 EV CA
+		TrustedCAs:     []string{"DigiCert", "Sectigo", "GlobalSign", "Certum"}, // 常见 EV CA
 	}
 }
 

@@ -252,12 +252,16 @@ func runUpgrade(args []string) {
 	}
 
 	upgradeCfg := cfg.GetUpgradeConfig()
+	defaultCfg := upgrade.DefaultConfig()
 	uCfg := &upgrade.Config{
-		Enabled:       upgradeCfg.Enabled,
-		Channel:       upgrade.Channel(upgradeCfg.Channel),
-		CheckInterval: upgradeCfg.CheckInterval,
-		LastCheck:     upgradeCfg.LastCheck,
-		ReleaseURL:    upgradeCfg.ReleaseURL,
+		Enabled:        upgradeCfg.Enabled,
+		Channel:        upgrade.Channel(upgradeCfg.Channel),
+		CheckInterval:  upgradeCfg.CheckInterval,
+		LastCheck:      upgradeCfg.LastCheck,
+		ReleaseURL:     upgradeCfg.ReleaseURL,
+		TrustedOrg:     defaultCfg.TrustedOrg,
+		TrustedCountry: defaultCfg.TrustedCountry,
+		TrustedCAs:     defaultCfg.TrustedCAs,
 	}
 	upgrader := upgrade.NewUpgrader(uCfg)
 
