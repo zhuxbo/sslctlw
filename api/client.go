@@ -72,7 +72,14 @@ func (c *CertData) GetDomainList() []string {
 	if c.Domains == "" {
 		return []string{}
 	}
-	return strings.Split(c.Domains, ",")
+	parts := strings.Split(c.Domains, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if d := strings.TrimSpace(p); d != "" {
+			result = append(result, d)
+		}
+	}
+	return result
 }
 
 // Client API 客户端
