@@ -428,6 +428,8 @@ func RunApp() {
 		app.withPausedTaskUpdate(func() {
 			ShowAPIDialog(app.mainWnd, func() {
 				app.doLoadDataAsync(nil)
+				// setup 成功后刷新自动部署状态（setup 内部已创建计划任务）
+				app.refreshAutoCheckStatus()
 			})
 		})
 	})
@@ -551,6 +553,31 @@ func (app *AppWindow) toggleAutoCheck() {
 				app.appendTaskLog("任务计划已创建: " + taskName)
 			})
 		}
+	}()
+}
+
+// refreshAutoCheckStatus 刷新自动部署按钮和状态指示器
+func (app *AppWindow) refreshAutoCheckStatus() {
+	go func() {
+		cfg, _ := config.Load()
+		taskName := util.DefaultTaskName
+		if cfg != nil && cfg.TaskName != "" {
+			taskName = cfg.TaskName
+		}
+		taskExists := util.IsTaskExists(taskName)
+
+		app.mainWnd.UiThread(func() {
+			if taskExists {
+				app.btnAutoCheck.SetText("停止自动部署")
+				app.statusIndicator.SetState(IndicatorRunning)
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: 任务计划运行中 (每天一次)")
+				app.appendTaskLog("一键部署完成，自动部署已启动")
+			} else {
+				app.btnAutoCheck.SetText("启动自动部署")
+				app.statusIndicator.SetState(IndicatorStopped)
+				app.lblTaskStatus.Hwnd().SetWindowText("状态: 未启动")
+			}
+		})
 	}()
 }
 

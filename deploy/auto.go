@@ -249,9 +249,10 @@ func AutoDeploy(cfg *config.Config, d *Deployer, scatterDelay bool) []Result {
 			cfg.Certificates[i].OrderID = certData.OrderID
 		}
 
-		// 部署成功后，从证书 PEM 提取域名更新配置
+		// 部署成功后更新配置
 		if hasSuccessResult(deployResults) && certData.Certificate != "" {
 			updateCertDomains(&cfg.Certificates[i], certData.Certificate)
+			updateCertSerial(&cfg.Certificates[i], certData.Certificate)
 		}
 		processed++
 	}
@@ -653,7 +654,7 @@ func parseCertExpiry(value string) (time.Time, bool) {
 func updateCertMetadata(certCfg *config.CertConfig, certData *api.CertData) {
 	certCfg.Metadata.CertExpiresAt = certData.ExpiresAt
 	certCfg.Metadata.LastDeployAt = time.Now().Format(timeFormat)
-	certCfg.Metadata.CertSerial = "" // 由安装后通过 thumbprint 获取
+	certCfg.Metadata.CertSerial = "" // 部署成功后由 updateCertSerial 回填
 	certCfg.Metadata.IssueRetryCount = 0
 	certCfg.Metadata.LastIssueState = ""
 	certCfg.Metadata.CSRSubmittedAt = ""
@@ -685,6 +686,15 @@ func hasSuccessResult(results []Result) bool {
 		}
 	}
 	return false
+}
+
+// updateCertSerial 从证书 PEM 提取序列号回填到配置
+func updateCertSerial(certCfg *config.CertConfig, certPEM string) {
+	serial, err := cert.GetCertSerialNumber(certPEM)
+	if err != nil || serial == "" {
+		return
+	}
+	certCfg.Metadata.CertSerial = serial
 }
 
 // updateCertDomains 从证书 PEM 提取域名更新配置

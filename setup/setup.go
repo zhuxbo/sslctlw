@@ -105,10 +105,13 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 		// 优先级 3：检查是否已在 Windows 证书存储中
 		serialNumber, _ := cert.GetCertSerialNumber(certData.Certificate)
 		if serialNumber != "" {
-			exists, _, _ := cert.IsCertExists(serialNumber)
+			exists, certInfo, _ := cert.IsCertExists(serialNumber)
 			if exists {
-				log.Printf("证书 %s 已存在，跳过安装", certData.Domain())
+				log.Printf("证书 %s 已存在，跳过导入", certData.Domain())
 				result.Skipped++
+				if certInfo != nil && certInfo.Thumbprint != "" {
+					bindCertToIIS(certData, certInfo.Thumbprint)
+				}
 				certConfigs = append(certConfigs, makeCertConfig(certData, opts, serialNumber))
 				continue
 			}
@@ -173,7 +176,7 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	}
 
 	// 6. 保存配置
-	report(fmt.Sprintf("保存配置（安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d）...",
+	report(fmt.Sprintf("保存配置（安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d）...",
 		result.Installed, result.Skipped, result.Failed, result.NeedKey))
 	if err := saveSetupConfig(certConfigs); err != nil {
 		log.Printf("警告: 保存配置失败: %v", err)
@@ -189,11 +192,11 @@ func Run(opts Options, progress ProgressFunc, promptKey PromptKeyFunc) (*RunResu
 	}
 
 	// 完成
-	report(fmt.Sprintf("完成: 安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d",
+	report(fmt.Sprintf("完成: 安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d",
 		result.Installed, result.Skipped, result.Failed, result.NeedKey))
 
 	if result.Failed > 0 || result.NeedKey > 0 {
-		return result, fmt.Errorf("部分证书部署未完成: 安装 %d, 跳过 %d, 失败 %d, 需要私钥 %d",
+		return result, fmt.Errorf("部分证书部署未完成: 安装 %d, 已存在 %d, 失败 %d, 需要私钥 %d",
 			result.Installed, result.Skipped, result.Failed, result.NeedKey)
 	}
 
