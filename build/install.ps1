@@ -86,12 +86,22 @@ function Write-NetworkError {
     }
 }
 
-# 构建 ReleaseUrl
-function Build-ReleaseUrl {
+# 发布目录探测
+# 先尝试根目录 https://{host}/sslctlw，失败回落到 https://{host}/release/sslctlw
+function Resolve-ReleaseUrl {
     param([string]$Host_)
     $Host_ = $Host_.TrimEnd("/")
     if ($Host_ -match "^https?://") { return $Host_ }
-    return "https://$Host_/sslctlw"
+    $candidates = @("https://$Host_/sslctlw", "https://$Host_/release/sslctlw")
+    foreach ($base in $candidates) {
+        try {
+            $json = Invoke-RestMethod -Uri "$base/releases.json" -TimeoutSec 10 -ErrorAction Stop
+            if ($json.main -or $json.dev) {
+                return $base
+            }
+        } catch {}
+    }
+    return $null
 }
 
 if ($Help) {
@@ -114,13 +124,18 @@ if ($Help) {
     exit 0
 }
 
-# 升级地址（优先参数，回落到内置默认值）
+# 升级地址（参数优先，回落到内置默认域名；再探测根目录 / /release/ 两种布局）
 $FallbackHost = "release.cnssl.com"
-if ($ReleaseHost) {
-    $ReleaseUrl = Build-ReleaseUrl $ReleaseHost
-} else {
-    $ReleaseUrl = Build-ReleaseUrl $FallbackHost
+$TargetHost = if ($ReleaseHost) { $ReleaseHost } else { $FallbackHost }
+
+Write-Info "探测发布目录..."
+$ReleaseUrl = Resolve-ReleaseUrl $TargetHost
+if (-not $ReleaseUrl) {
+    $h = $TargetHost.TrimEnd("/")
+    Write-Err "发布目录不可达: https://$h/sslctlw/releases.json 与 https://$h/release/sslctlw/releases.json 均无响应"
+    exit 1
 }
+Write-Info "使用发布地址: $ReleaseUrl"
 
 # --- 辅助函数 ---
 
@@ -316,7 +331,13 @@ while (-not $downloaded) {
         Write-Err "下载失败，安装中止"
         exit 1
     }
-    $ReleaseUrl = Build-ReleaseUrl $newHost
+    $resolved = Resolve-ReleaseUrl $newHost
+    if (-not $resolved) {
+        $h = $newHost.TrimEnd("/")
+        Write-Warn "发布目录不可达: https://$h/sslctlw/releases.json 与 https://$h/release/sslctlw/releases.json 均无响应"
+        continue
+    }
+    $ReleaseUrl = $resolved
     $DownloadUrl = "$ReleaseUrl/$Channel/$TargetVersion/$ArtifactName"
     Write-Info "重试下载: $DownloadUrl"
     $downloaded = Download-Package -Url $DownloadUrl -OutFile $TempExe
