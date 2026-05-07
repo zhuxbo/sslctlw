@@ -114,7 +114,7 @@ bash build/release.sh <版本号>
 2. **EV 代码签名**：`build/sign.sh dist/sslctlw.exe`，调 SimplySign Desktop + signtool；签名失败则中止
 3. **ensure_tag**：脚本侧二次确认 tag 存在（4.3 已显式打过，幂等）
 4. **SSH 连通性测试**：再次 ping 每台 SERVER
-5. **rsync 上传**：`dist/sslctlw.exe` → 每台服务器 `<目录>/main/v<版本号>/sslctlw-windows-amd64.exe`；远端 Python 内联更新 `releases.json`（`main.latest = <版本号>`，`versions[]` 头部插入新版，保留 `KEEP_VERSIONS` 个）；维护远端 `latest/` 软链接目录指向新版；清理超额旧版本
+5. **rsync 上传**：`dist/sslctlw.exe` → 每台服务器 `<目录>/main/v<版本号>/sslctlw-windows-amd64.exe`；远端 Python 内联更新 `releases.json`（`main.latest = <版本号>`，`versions[]` 头部插入新版，保留 `KEEP_VERSIONS` 个）；清理超额旧版本
 
 任意服务器失败 → 退出码非零，用 `--server <名称> <版本号>` 重试单台。
 
