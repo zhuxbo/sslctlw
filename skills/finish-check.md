@@ -1,162 +1,122 @@
 # 完成检查
 
-这是 sslctlw 本地 finish-check 的唯一清单。先确定审查范围，再逐项执行；任一必需项失败时结论只能是“需要修复”。不要把非 Windows 的测试编译报告成 Windows 运行测试通过。
+这是 sslctlw 本地 finish-check 的唯一清单。目标是用最小充分证据判断本次改动能否提交。默认按变更选择检查；“finish-check”“完成检查”“提交前检查”均不隐含全量。用户明确要求“全量 finish-check”，或 main 正式发布门禁引用本清单时，才执行全量模式。检查不自动授权提交、推送、发布或实机集成操作。
 
-## 0. 范围与环境
+## 1. 确定范围，选择检查
 
-```bash
-git status --short --branch
-git diff --stat
-git diff
-git diff --cached
-```
+先查看 `git status --short --branch`、未暂存与已暂存 diff，以及任务涉及的未跟踪文件内容。已提交的分支改动使用明确的 `<base>...HEAD`；同时纳入该任务后续工作区改动。基线由任务与分支关系确定，不硬编码 `origin/dev`。无 diff 不等于已经检查过：默认模式若没有明确待审提交或范围，说明无待检查改动后结束；明确全量请求或正式发布仍检查当前目标 commit。
 
-若改动已经在特性分支提交，以明确的 `<base>...HEAD` 检查全部提交和 diff。记录宿主平台、Go 版本、golangci-lint 版本以及本次跳过项的原因。
+只纳入当前任务改动及直接影响链，保留无关脏文件。路径用于定位，diff 语义决定风险；不能只因后缀是 `.md` 就忽略其中的流程或命令变化。先用一句话说明选定模式、范围和检查项，不要求另写计划或逐条解释全部未选项。
 
-## 1. 确定性治理与脚本静态检查
+| 模式/变更 | 必需检查 |
+| --- | --- |
+| 轻量：说明、注释、文案，不改变执行行为 | diff 审查、引用/示例与实际实现一致、`git diff --check`；不运行 Go、发布 helper 或 Windows VM |
+| 轻量：`AGENTS.md`、`skills/`、工具薄入口、`.gitattributes`、治理文档 | 上述检查 + `bash build/check-governance.sh`；流程变化还须用代表性场景核对分支选择，命令变化验证受影响命令 |
+| 定向：局部 Go 行为或测试修改 | 受影响包及直接受影响调用方的测试、vet、lint + 一次 Windows amd64 主程序构建；非 Windows 只编译所选测试包，运行证据按第 4 节处理 |
+| 定向：构建、发布、安装、签名或治理脚本 | 治理 + 改动脚本的语法与相关回归，按第 3 节选择；没有 Go/工具链影响时不附加 Go 全套 |
+| 定向：安全、并发、持久化、IIS 恢复、跨模块契约 | 增加直接影响链审查与对应失败路径回归；范围不能可靠限定、共享基础设施或依赖/工具链变化时扩大到全仓 Go 检查，不自动附加无关发布检查 |
+| 全量：明确全量请求或 main 正式发布 | 治理、第 2 节全仓 Go 检查（含版本注入）、第 3 节全组脚本检查、第 4 节 Windows 证据及相关专项审查 |
 
-```bash
-bash build/check-governance.sh
-bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh build/release-helper-test.sh
-bash build/release-helper-test.sh
-bash build/release.sh --dry-run 1.2.3-rc.1
-bash build/release.sh --dry-run 1.2.3
-```
+混合改动取所需检查的并集，同一命令不重复执行。`.github/workflows/`、`go.mod`、`go.sum`、`_windigo/`、资源/manifest 变更按实际影响增加构建、测试或工作流检查，不归入纯文档。测试文件、fixture、build tag 与生成输入也属于检查输入。
 
-Windows CI 还必须使用 PowerShell AST parser 确认 `build/sign-via-simplysign.ps1` 无语法错误；静态解析不调用签名 API，也不需要 Bearer Token。
+## 2. Go 检查（选中时才执行）
 
-治理检查必须确认固定 `CLAUDE.md`、扁平领域 skill、路由叶子、旧路径清理，以及 Claude/Codex 的 `remote-release`、`finish-check` 薄入口完全一致。dry-run 不得构建、签名、连接 SSH、修改 Git 或创建 bundle。
-
-若修改发布脚本，再使用临时目录或 mock 验证以下语义：
-
-- 稳定版与预发布版 SemVer 分流，非法版本拒绝。
-- main bundle 拒绝脏工作区、非 main、`main != origin/main`；dev manifest 正确记录 `source_commit`/`dirty`。
-- manifest 的正式资产集合只有 `sslctlw-windows-amd64.exe`，哈希在签名后计算。
-- main 已存在版本目录或索引条目时拒绝覆盖；dev 同版本可替换。
-- `stage` 先全节点隐藏暂存并校验，`publish` 才更新公开目录/索引；失败返回非零并保留 bundle。
-- 并发发布被发布根 owner 与 publish token 拒绝；中断后的 `resume-publish` 只能复用原 token，其他协调器不能提交或回滚。
-- tag 后恢复只复用原 bundle，不调用构建或签名。
-
-## 2. Windows amd64 编译与静态分析
-
-所有非 Windows 主机命令固定发布目标，避免 Apple Silicon 等环境误用 windows/arm64：
+以 `go.mod` 的 toolchain 为准；固定 `GOOS=windows GOARCH=amd64`。记录用到的 Go/lint 版本即可；轻量检查不探测或安装 Go/lint 工具。缓存不可写时使用临时可写 `GOCACHE`/`GOLANGCI_LINT_CACHE`，不要把环境错误当作代码失败或反复原样重试。
 
 ```bash
+# Go 生产行为变更：一次主程序构建
 GOOS=windows GOARCH=amd64 go build -o /dev/null .
+# 仅版本注入/构建链变化或全量时追加
 GOOS=windows GOARCH=amd64 go build -ldflags "-X main.version=check-test" -o /dev/null .
-GOOS=windows GOARCH=amd64 go vet ./...
 ```
 
-## 3. golangci-lint 基线零净增
-
-本仓存在历史告警，只要求本次改动不新增。使用兼容 Go 1.26 的 golangci-lint 环境，且固定 `GOOS=windows GOARCH=amd64`：
+vet、lint、测试使用同一组选定包。以下以 `./ui` 为例，执行前替换成实际包列表；全仓用 `./...`：
 
 ```bash
-GOOS=windows GOARCH=amd64 golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 ./...
+GOOS=windows GOARCH=amd64 go vet ./ui
+GOOS=windows GOARCH=amd64 golangci-lint run --max-issues-per-linter=0 --max-same-issues=0 ./ui
+# Windows 上运行所选包的测试
+go test -count=1 ./ui
+# 非 Windows 仅编译所选包；多个包分别执行 -c
+GOOS=windows GOARCH=amd64 go test -c -o /dev/null ./ui
 ```
 
-若绝对结果非零，对比任务基线（通常 `origin/dev`），按“文件、linter、消息”归一化后确认 HEAD 侧零新增。工作区有改动时不得通过切换分支破坏用户文件，可使用独立临时 worktree 或对仅文档/脚本变更说明 Go 告警集合未受影响。macOS 出现 `context loading failed: no go files to analyze` 属跨平台工具链限制，不等于 lint 通过；应在 Go 1.26 Windows 环境重跑或如实报告未验证。
-
-## 4. 测试
-
-Windows 发布/CI 环境：
-
-```bash
-go test -count=1 ./...
-```
-
-### 本机 Windows VM 运行验证
-
-项目根 `.env` 可保存当前开发机专用的 SSH 连接参数；该文件必须保持忽略，不得提交：
-
-```dotenv
-SSLCTLW_WINDOWS_SSH_KEY=/absolute/path/to/private-key
-SSLCTLW_WINDOWS_SSH_USER=Administrator
-SSLCTLW_WINDOWS_SSH_HOST=192.0.2.10
-SSLCTLW_WINDOWS_SSH_PORT=22
-SSLCTLW_SIGNING_BASE_URL=https://signing.example.com
-SSLCTLW_SIGNING_BEARER_TOKEN=protected-token
-```
-
-`.env` 必须为 `0600` 且保持 Git 忽略。不得将它整体复制到 Windows VM；需要真实签名时，只将 Token 写入远端随机临时文件，收紧 ACL 后通过文件路径交给签名脚本，并在结束时删除。
-
-从 macOS 向长期使用的 Windows VM 发送当前工作区时，使用独立临时目录，禁止覆盖远端已有项目；
-打包须禁用 macOS 扩展属性，避免 `._*` AppleDouble 文件令治理检查误判：
-
-```bash
-set -a
-. ./.env
-set +a
-
-: "${SSLCTLW_WINDOWS_SSH_KEY:?}"
-: "${SSLCTLW_WINDOWS_SSH_USER:?}"
-: "${SSLCTLW_WINDOWS_SSH_HOST:?}"
-: "${SSLCTLW_WINDOWS_SSH_PORT:?}"
-
-target="${SSLCTLW_WINDOWS_SSH_USER}@${SSLCTLW_WINDOWS_SSH_HOST}"
-snapshot="/tmp/sslctlw-windows-validation.tar.gz"
-remote_dir="C:/Users/${SSLCTLW_WINDOWS_SSH_USER}/sslctlw-validation-$(date +%Y%m%d-%H%M%S)"
-
-COPYFILE_DISABLE=1 tar -czf "$snapshot" --exclude=.git --exclude=.env .
-ssh -i "$SSLCTLW_WINDOWS_SSH_KEY" -p "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$target" "mkdir $remote_dir"
-scp -i "$SSLCTLW_WINDOWS_SSH_KEY" -P "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$snapshot" "$target:$remote_dir/source.tar.gz"
-```
-
-在远端校验快照 SHA256 后解压，再执行：
-
-```text
-go test -count=1 ./...
-go vet ./...
-go build -o out\sslctlw-windows-amd64.exe .
-go build -ldflags "-X main.version=check-test" -o out\sslctlw-windows-amd64-versioned.exe .
-"C:\Program Files\Git\bin\bash.exe" build/check-governance.sh
-```
-
-默认测试不启用 `integration` build tag。未经用户明确允许，不得运行会修改 IIS、证书存储、绑定或计划
-任务的实机集成测试。验证结束后只删除本轮创建的精确远端临时目录。Windows VM 运行结果可补充本地
-证据，但合并和发布仍须满足下文同一 commit 的 GitHub `windows-2022` 要求。
-
-非 Windows 环境无法运行本仓依赖 windigo/Windows syscall 的测试；编译每个 Windows 测试包，并明确把运行期验证留给 Windows CI：
+非 Windows 全仓测试编译：
 
 ```bash
 packages="$(GOOS=windows GOARCH=amd64 go list ./...)" || exit 1
 [ -n "$packages" ] || { echo "未发现 Windows 测试包" >&2; exit 1; }
 while IFS= read -r package; do
-  GOOS=windows GOARCH=amd64 go test -count=1 -c -o /dev/null "$package" || exit 1
+  GOOS=windows GOARCH=amd64 go test -c -o /dev/null "$package" || exit 1
 done <<<"$packages"
 ```
 
-最终必须引用同一 commit 的 GitHub `windows-2022` 运行结果作为 Windows 行为证据。只要求本地提交且明确禁止推送时，将该项标为“待推送后验证”，不得声称 Windows 运行测试通过；它不阻止本地提交，但仍阻止合并和发布。测试暴露生产缺陷时修复生产代码，不削弱安全校验或篡改断言迎合错误行为。
+已有测试能覆盖时直接使用；只为明确的行为缺口添加回归，不给文案、注释写镜像测试。排查时可先用 `-run` 缩小复现；所选包测试完成后不必再次单跑其已覆盖的定向测试。并发变化按需要增加 race/生命周期验证；环境不支持时如实说明。
 
-## 5. 变更面专项审查
+### lint 零净增
 
-只对本次涉及的包执行，但必须明确说明跳过理由：
+本仓有历史告警，要求本次变更零新增。lint 非零时，用同一工具版本、配置、目标平台和包范围对比任务基线，按“文件、linter、消息”归一化；不为消除历史告警扩大修改。确需取基线源码时使用临时目录或独立 worktree，不切换脏工作区。macOS 的 `context loading failed: no go files to analyze` 不等于通过；在兼容工具链/Windows 环境补验或标为未验证。
 
-- `ui/`：UI 更新只在 `UiThread`，耗时操作不进 UI 线程，goroutine 有 recover，模态回调正确停用/恢复，`LockOSThread` 与 LogBuffer 锁不被破坏。
-- `iis/`、`cert/`、`config/`：参数化外部命令、PowerShell/路径输入安全、机器作用域 DPAPI 和 SYSTEM/Administrators DACL、SNI/IP 区分、替换前完整快照、状态未知不做破坏性回滚、恢复后复验。
-- `api/`、`deploy/`：per-cert client、超时/响应关闭/Token 脱敏、回调字段和截断、订单级聚合单发、部分失败/无匹配不得假成功。
-- `upgrade/`：SemVer、HTTPS/SHA256、Authenticode 组织/国家/CA 校验、临时文件与原子替换。
-- `setup/`：CLI/GUI 共用进度只经 `ProgressFunc`，库层不直接 `fmt.Print`。
-- `build/`：正式资产集合、签名后哈希、bundle 不重建、main 不可变、dev dirty 记录、多节点先暂存后公开、索引原子替换和恢复路径。
+## 3. 脚本检查（选中时才执行）
 
-## 6. 规范与文档职责
+| 改动 | 检查 |
+| --- | --- |
+| `build/check-governance.sh` | `bash -n` + 运行治理；改了门禁判定时在临时副本验证相关有效/无效输入 |
+| `build/release-helper.py`、`build/release-helper-test.sh`、`build/release.sh` | 相关语法检查 + `bash build/release-helper-test.sh` + 稳定/预发布两次 dry-run |
+| `build/build.sh`、`build/sign.sh`、发布配置契约 | 相关 Bash 语法 + 受影响的 mock/契约验证；涉及构建参数或版本注入时追加对应 Windows 构建 |
+| `build/sign-via-simplysign.ps1`、`build/install.ps1` | Windows PowerShell AST 语法解析 + 对应改动的 mock/兼容性验证；静态检查不调用签名 API |
+| `.github/workflows/`、`docker/` | 配置/命令核对 + 受影响的步骤验证；单纯说明调整不触发完整构建 |
 
-- 本任务若未修改 `deploy-spec.md`，确认 diff 中没有该文件并跳过跨仓字节比较。
-- 若明确修改了它，才由统一多仓流程检查 `sslctl`、`sslctlw`、`sslbt` 三仓字节一致；单仓 finish-check 不拉取其他仓移动分支。
-- 检查 `AGENTS.md`、skills、工具入口、README 和构建文档没有复制冲突规则，所有命令和路径真实存在。
-- 新增过程文档只能位于被忽略的 `.superpowers/`，不得提交或被代码/入库文档引用。
-
-## 7. 最终 diff 与提交准备
+全量模式执行：
 
 ```bash
-git diff --check
-git status --short
-git diff --stat
-git diff
+bash build/check-governance.sh
+bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh build/release-helper-test.sh
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("build/release-helper.py").read_text(encoding="utf-8"))'
+bash build/release-helper-test.sh
+bash build/release.sh --dry-run 1.2.3-rc.1
+bash build/release.sh --dry-run 1.2.3
 ```
 
-逐文件确认无意外改动、无调试代码、无失效引用、无秘密配置、无过期说明；按第 6 节确认 `deploy-spec.md` 是否属于本任务授权范围。提交信息遵循仓库历史的 `type: 中文主题`，body 2–10 条总结性要点，不添加 AI 署名。
+Windows 解析命令以 `.github/workflows/ci.yml` 的 `Signing client syntax check` 为准；安装脚本变更时同样解析，并核对 `skills/build-release.md` 的 PowerShell 3.0 兼容约束。解释器按当前环境选择已验证的 Python 3。dry-run 不得构建、签名、连接 SSH、修改 Git 或创建 bundle。
 
-## 输出
+发布行为改动还须核对受影响的语义：SemVer 分流、main 干净且与远端一致、正式资产集合及签名后哈希、main 不可覆盖/dev 可替换、全节点 stage 后才 publish、owner/token 并发互斥、失败保留 bundle、tag 后恢复不重建。只补现有 helper 测试未覆盖的相关场景，使用临时目录或 mock，不为完成检查启动真实发布。
 
-用表格报告：治理、脚本静态/dry-run、编译、版本注入、vet、lint、宿主测试、Windows 测试编译、Windows CI、专项审查、文档职责、`git diff --check`。每项给出实际命令、结果和限制；最后只给出“可以提交”或“需要修复”。
+## 4. Windows 证据与停止条件
+
+- 不在非 Windows 执行依赖 windigo/Windows syscall 的宿主全仓测试，也不把 `go test -c` 当作运行通过。
+- 轻量且未改变 Windows 执行行为的改动，不启动 VM 或等待 CI 作为本地提交条件。普通定向检查先用本机可用证据，不因 `.env` 存在就自动上传工作区；确需 VM 时按 `skills/build-release.md` 的“按需 Windows VM 验证”执行。
+- 合并和 main 正式发布仍要求同一 commit 的 GitHub `windows-2022` required check `test` 成功，CI 全套不因本地分级而缩减。Windows VM 只能补充行为证据。尚未推送/未提交时可标记“本地检查通过；Windows CI 待推送后验证”，不阻止本地提交，仍阻止合并/正式发布；不为取得 CI 擅自推送。
+- 默认测试不启用 `integration` tag；会修改 IIS、证书存储、绑定或计划任务的实机集成测试须有用户明确授权。签名、DPAPI、ACL、私钥配对与恢复校验不能为了通过测试而削弱。
+- 同一轮已通过且输入未变的检查直接复用：核对源码、测试/fixture、配置、依赖、工具版本、平台和命令范围，并能指出原结果。源码变化只重跑受影响的门禁；单纯文档收尾不使 Go 证据失效。跨会话无可核对证据时重新执行必要项；CI 仍须绑定精确 commit。
+- 审核只覆盖改动及直接影响链，发现须有代码或可复现证据；区分“必须修复”“建议改进”“无关事项”。无关事项不触发本次修复；有明确高风险时才增加独立审核，普通维护不要求多轮 reviewer。
+- 必需项失败就修复对应问题；环境缺失则标记“未验证/受阻”，不假报通过。验收满足、适用检查通过且无阻塞后结束；仅新修改、失败或具体未解决风险可扩大或重跑。
+
+## 5. 按影响链审查
+
+只读命中领域的相关章节：
+
+- `ui/`：`skills/windigo-ui.md` 的 UI 线程、回调恢复、goroutine 生命周期、DPI 与锁。
+- `iis/`、`cert/`、`config/`：`skills/iis-ops.md` / `skills/go-dev.md` 的外部命令输入、机器作用域 DPAPI、数据目录 DACL、SNI/IP、替换快照、未知状态不破坏性回滚与恢复复验。
+- `api/`、`deploy/`：`skills/api.md` 的 per-cert client、超时/响应关闭/脱敏、CSR 不重放、订单级回调和部分失败语义。
+- `upgrade/`：SemVer、HTTPS/SHA256、Authenticode 组织/国家/CA 校验、临时文件与原子替换。
+- `setup/`：`skills/go-dev.md` 的 CLI/GUI 共享 `ProgressFunc`，库层不直接 `fmt.Print`。
+- `build/`：`skills/build-release.md` 的资产、签名和恢复契约。
+
+文档/规范只检查受影响的职责与引用。本任务未修改 `deploy-spec.md` 时跳过跨仓比较；修改时才由统一多仓流程检查 `sslctl`、`sslctlw`、`sslbt` 字节一致，单仓检查不拉取其他仓移动分支。
+
+## 6. 有证据的自进化
+
+每次完成检查顺带判断现有规则是否造成漏检、误报、无效重跑或重复阅读；没有新证据就不改文件、不写复盘。自进化是本仓现有 skill 的小范围维护，不是每轮增加门禁或生成新的检查框架。
+
+1. 触发证据：当前 diff/实现证明文档失效、可复现的漏检/误报，或至少两次可核对的同类无效检查。耗时结论使用实际命令与耗时；单次环境慢不作为永久跳过理由。
+2. 在当前任务允许修改时，可直接修正本文件的选择规则或命中领域的既有章节，并删除被替代的重复/过期内容；“仅检查/只分析”时只报告建议。优先修改现有规则，不默认新增文档、全局约束或工具入口，也不自动提交。
+3. 保留触发条件、检查能证明什么及不能证明什么。不能通过改规则把当前失败改成通过，也不能降低安全不变量、跨仓契约、Windows CI 或正式发布门禁；此类政策变化须单独由用户决定。
+4. 用本次场景和一个相邻反例验证新规则，再运行治理与 diff 检查即可；规则变化若暴露漏项，补跑该必需项。纯规则收尾不重跑已通过的无关 Go/发布检查，也不递归启动新一轮自进化。
+5. 最终答复简述“证据 → 规则调整 → 验证”。只有确需跨轮保留未收敛证据时才在已忽略的 `.superpowers/` 留短记录，不包含秘密、不作为通过凭证；代码、注释、入库文档不得引用过程记录。
+
+## 7. 收尾输出
+
+最后检查暂存与未暂存的 `git diff --check`、状态及最终 diff，确认无意外改动、秘密配置或失效引用。提交遵循 `AGENTS.md` 与用户授权。
+
+简短报告模式与范围、实际执行的命令/结果、复用证据和未验证限制；无关跳过项可合并说明，不强制全量空表。结论区分“可以提交”“需要修复”“检查未完成（缺少什么证据）”；本地可提交与合并/发布资格分开说明。只有自进化实际修改规则时才追加说明。

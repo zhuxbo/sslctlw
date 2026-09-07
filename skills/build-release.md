@@ -13,6 +13,8 @@
 
 ## 构建
 
+发布脚本的解释器约束：Git Bash 的 ACL 操作通过 `%WINDIR%` 定位系统 `powershell.exe`，不依赖 PATH、应用别名或 PowerShell 7 的文件 ACL API；Python 等外部解释器必须版本探测并保存已验证的绝对路径，不仅凭 `command -v`；Bash 子流程复用当前 `$BASH` 绝对路径，避免调用 Windows `bash.exe`/WSL 应用别名。
+
 `build/build.sh <version>` 是唯一发布构建入口：
 
 1. 从 `go.mod` 读取并强制使用精确的 `toolchain go1.26.8`。
@@ -87,7 +89,7 @@ bash build/release.sh test                      # 只测试所有节点 SSH 与�
 
 脚本不创建或移动 Git tag，不操作 GitHub Release，不合并或推送分支。`main` 不允许跳过构建/签名、单节点公开发布、覆盖已有正式目录或更新已有同版本索引；`stage` 可幂等重试，并要求所有节点生成的下一版索引字节一致。每个节点的发布根从 `stage` 到 `cleanup` 或成功 `rollback` 由同一 bundle 持久占用，其他发布必须失败；本地协调器互斥与首次 `publish` 生成的唯一 attempt token 共同阻止同一 bundle 的并发操作。回滚先在全部节点完成只读 CAS/备份预检，再绑定 `rolling-back` 阶段，最后才恢复公开状态；已完成节点在 `.staging/.control/` 中保留可验证完成标记，支持另一节点失败后的幂等重试。`publish` 比较生成待发布索引时的基线代际，拒绝覆盖已变化的索引。索引通过同目录临时文件原子替换，任一节点失败时返回非零。`verify` 保留暂存与回滚数据供恢复，只有完整验收后才运行 `cleanup`；持久 helper、互斥文件和完成标记统一位于 `.staging/.control/`，旧版互斥文件通过原子移动迁入而不直接删除。成功清理后发布根只保留 `.staging/` 与 `.rollback/` 两个隐藏目录，并清除旧版曾留在根目录的其他控制文件。
 
-## 本地可执行验证
+## 发布脚本本地验证
 
 ```bash
 bash -n build/build.sh build/sign.sh build/release.sh build/check-governance.sh build/release-helper-test.sh
@@ -97,4 +99,60 @@ bash build/release.sh --dry-run 1.2.3
 bash build/check-governance.sh
 ```
 
+日常完成检查按 `skills/finish-check.md` 选择，不因读取本文件而自动执行整组命令。
+
 这些检查不证明真实 Authenticode、SSH、多节点原子提升或公网下载可用；正式发布验收仍按 `skills/remote-release.md` 执行。
+
+## 按需 Windows VM 验证
+
+仅在需要 Windows 运行证据且当前任务允许时使用；不因运行 finish-check 自动连接 VM。测试范围按 `skills/finish-check.md` 选择，不执行发布步骤。
+
+项目根 `.env` 可保存当前开发机专用的 SSH 连接参数；该文件必须保持忽略，不得提交：
+
+```dotenv
+SSLCTLW_WINDOWS_SSH_KEY=/absolute/path/to/private-key
+SSLCTLW_WINDOWS_SSH_USER=Administrator
+SSLCTLW_WINDOWS_SSH_HOST=192.0.2.10
+SSLCTLW_WINDOWS_SSH_PORT=22
+SSLCTLW_SIGNING_BASE_URL=https://signing.example.com
+SSLCTLW_SIGNING_BEARER_TOKEN=protected-token
+```
+
+`.env` 必须为 `0600` 且保持 Git 忽略。不得将它整体复制到 Windows VM；需要真实签名时，只将 Token 写入远端随机临时文件，收紧 ACL 后通过文件路径交给签名脚本，并在结束时删除。
+
+从 macOS 向长期使用的 Windows VM 发送当前工作区时，使用独立临时目录，禁止覆盖远端已有项目；
+打包须禁用 macOS 扩展属性，避免 `._*` AppleDouble 文件令治理检查误判：
+
+```bash
+set -a
+. ./.env
+set +a
+
+: "${SSLCTLW_WINDOWS_SSH_KEY:?}"
+: "${SSLCTLW_WINDOWS_SSH_USER:?}"
+: "${SSLCTLW_WINDOWS_SSH_HOST:?}"
+: "${SSLCTLW_WINDOWS_SSH_PORT:?}"
+
+target="${SSLCTLW_WINDOWS_SSH_USER}@${SSLCTLW_WINDOWS_SSH_HOST}"
+validation_dir="$(mktemp -d)"
+snapshot="$validation_dir/source.tar.gz"
+remote_dir="C:/Users/${SSLCTLW_WINDOWS_SSH_USER}/sslctlw-validation-$(date +%Y%m%d-%H%M%S)"
+
+COPYFILE_DISABLE=1 tar -czf "$snapshot" --exclude=.git --exclude=.env --exclude=.superpowers --exclude=build/recovery --exclude=build/build.conf --exclude=build/release.conf .
+ssh -i "$SSLCTLW_WINDOWS_SSH_KEY" -p "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$target" "mkdir $remote_dir"
+scp -i "$SSLCTLW_WINDOWS_SSH_KEY" -P "$SSLCTLW_WINDOWS_SSH_PORT" -o BatchMode=yes "$snapshot" "$target:$remote_dir/source.tar.gz"
+```
+
+本机计算快照 SHA256，与远端文件核对一致后解压。按 `skills/finish-check.md` 选定范围运行；下面仅为全量验证示例，定向检查不要扩大到全仓：
+
+```text
+go test -count=1 ./...
+go vet ./...
+go build -o out\sslctlw-windows-amd64.exe .
+go build -ldflags "-X main.version=check-test" -o out\sslctlw-windows-amd64-versioned.exe .
+"C:\Program Files\Git\bin\bash.exe" build/check-governance.sh
+```
+
+默认测试不启用 `integration` build tag。未经用户明确允许，不得运行会修改 IIS、证书存储、绑定或计划
+任务的实机集成测试。验证结束后只删除本轮创建的精确远端临时目录和本机 `validation_dir`。Windows VM 运行结果可补充本地
+证据，但合并和 main 正式发布仍须满足 `skills/finish-check.md` 中同一 commit 的 GitHub `windows-2022` 要求。

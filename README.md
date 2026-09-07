@@ -126,6 +126,8 @@ GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.version=1.0
 
 正式发布不是单个脚本命令：必须遵守 `skills/remote-release.md` 的 PR、CI、持久化 bundle、全节点暂存、不可变 tag/GitHub Release、恢复和最终验收顺序。平台资产与签名细节见 `skills/build-release.md`；`build/release.sh --dry-run <version>` 可无副作用检查版本分流与执行计划。
 
+开发收尾使用 `skills/finish-check.md`：默认按改动选择轻量或定向检查，明确要求全量或 main 正式发布时执行全量；本地分级不缩减 Windows CI 和正式发布门禁。
+
 ## 技术栈
 
 | 组件 | 技术 |
