@@ -1,5 +1,7 @@
 # IIS 运维
 
+适用于 IIS 站点、证书绑定/恢复与自动任务健康。按操作选择相关章节；以下修改系统状态的命令是语法参考，不能当作 finish-check 默认执行项。
+
 ## appcmd 路径
 
 ```go
@@ -22,10 +24,7 @@ appcmd list site /xml
 
 `protocol/IP:Port:Host` → `https/*:443:example.com`
 
-```go
-parts := strings.SplitN(binding, "/", 2)  // ["https", "*:443:example.com"]
-segments := strings.Split(parts[1], ":")  // ["*", "443", "example.com"]
-```
+解析复用 `iis/appcmd.go` 的 `parseBindings` 及其测试；不要把示例字符串拆分直接用于未知输入。
 
 ## netsh 证书绑定
 

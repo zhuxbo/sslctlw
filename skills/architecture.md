@@ -1,8 +1,10 @@
 # 项目架构
 
+适用于模块边界、数据流与配置结构。先定位相关模块，再读取涉及的领域契约；不把模块列表当作全仓检查范围。
+
 ## 概述
 
-sslctlw 是一个 IIS SSL 证书部署工具，使用 Go + windigo 构建，编译为单文件 Windows GUI 应用程序。
+sslctlw 是一个 IIS SSL 证书部署工具，使用 Go + windigo 构建，编译为同一个 Console 子系统 Windows EXE，同时提供 CLI 与 GUI。
 
 ## 模块依赖关系
 
@@ -78,71 +80,17 @@ sslctlw 是一个 IIS SSL 证书部署工具，使用 Go + windigo 构建，编�
 | 文件 | 职责 |
 |------|------|
 | `store.go` | Windows 证书存储操作 |
-| `pfx.go` | PFX 格式转换 |
+| `converter.go` | PFX 格式转换 |
 | `csr.go` | CSR 生成 |
-| `orderstore.go` | 本地订单存储 |
+| `keystore.go` | 本地订单存储 |
 
 ## 核心数据流
 
-### 1. 自动签发模式部署流程
+- CLI/GUI 共用部署编排；`deploy/auto.go` 获取部署运行锁，逐证书使用独立 API Client，返回 `RunReport` 供两端消费。
+- pull 模式查询既有订单，满足部署门禁后校验证书与私钥，转换 PFX、安装、替换绑定、持久化并发送订单级聚合回调。
+- local 模式的新 CSR 意图先持久化 pending 私钥、CSR metadata 与计数，再 POST；不确定结果下轮先 GET 确认归属，成功部署后转正私钥。不得把私钥持久化放在提交之后。
 
-```
-用户配置证书 → 定时检测触发
-                   │
-                   ▼
-         API 查询证书状态
-         (GetCertByOrderID)
-                   │
-                   ▼
-         检查是否到期/需更新
-                   │
-                   ▼ (是)
-         下载证书 (含私钥)
-                   │
-                   ▼
-         PEM → PFX 转换
-                   │
-                   ▼
-         安装到 Windows 证书存储
-                   │
-                   ▼
-         绑定到 IIS (netsh)
-                   │
-                   ▼
-         发送部署回调
-```
-
-### 2. 本机提交模式部署流程
-
-```
-用户配置证书 (UseLocalKey=true)
-                   │
-                   ▼
-         检查是否需要续签
-                   │
-                   ▼ (是)
-         本地生成 CSR + 私钥
-                   │
-                   ▼
-         提交 CSR 到 API
-         (SubmitCSR)
-                   │
-                   ▼
-         保存私钥到本地
-                   │
-                   ▼
-         等待 CA 签发
-         (processing → active)
-                   │
-                   ▼
-         下载证书 (不含私钥)
-                   │
-                   ▼
-         使用本地私钥合成 PFX
-                   │
-                   ▼
-         安装 + 绑定 + 回调
-```
+状态、重试、失败收敛与回调的完整契约只维护在 `skills/api.md`；IIS 替换/恢复细节见 `skills/iis-ops.md`。
 
 ## SSL 绑定类型
 
@@ -230,22 +178,13 @@ result, err := client.GetCertByOrderID(ctx, orderID)
 
 ## 测试策略
 
-| 模块 | 测试方式 | 覆盖目标 |
-|------|----------|----------|
-| api/ | httptest Mock 服务器 | 90%+ |
-| deploy/ | 接口 Mock + 集成测试 | 60%+ |
-| iis/ | 输出解析测试 + 参数验证 | 55%+ |
-| cert/ | 文件系统测试 | 70%+ |
-| config/ | 序列化/反序列化测试 | 90%+ |
+验证范围以 `skills/finish-check.md` 为准。`api/` 使用 httptest 与注入的 DNS 结果；`deploy/` 使用接口 mock 验证状态和失败路径；`iis/` 检查解析与绑定恢复；`cert/`、`config/` 检查存储、序列化和配对边界。不把历史覆盖率百分比作为每次修改必须提升的门槛。
 
 ## 已知限制和设计假设
 
-### 单实例假设
+### 部署运行锁
 
-程序假设同一时间只有一个实例运行，没有进程互斥锁。多实例并发运行可能导致：
-- 配置文件读写冲突
-- 证书重复安装
-- 回调重复发送
+`deploy/auto.go` 在数据目录打开 `deploy.lock`，通过 `deploy/flock_windows.go` 的 `LockFileEx` 非阻塞获取进程间排他锁；锁占用返回 `RunReport.AlreadyRunning`。这只描述自动部署入口的互斥，不代表所有 CLI/GUI 配置操作都有全局事务隔离。
 
 ### Windows 文件权限位
 
@@ -279,9 +218,3 @@ Go 侧在 `status` 命令与守护（`deploy --all`）启动时各做一次 ACL 
 
 旧版本用用户作用域加密的密文（前缀 `v1:` / `v1:dpapi:`）仍兼容解密：能解密时会在配置加载或私钥读取时透明重加密为机器作用域；
 若由其他账户加密而无法解密，`GetToken()` 会显式报错提示重新 setup 重录 Token，不再静默失败。
-
-## 扩展点
-
-1. **新验证方法**: 修改 `config.ValidateValidationMethod()` 和 API 调用
-2. **新部署目标**: 实现 `IISBinder` 接口的其他服务器类型
-3. **新存储后端**: 实现 `OrderStore` 接口的云存储版本

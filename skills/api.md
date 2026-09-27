@@ -1,5 +1,7 @@
 # Deploy API 规范
 
+适用于 Deploy API、续签状态、私钥选择与回调。接口修改读对应接口及重试章节；状态编排修改读部署模式与运行时行为。公共语义以 `deploy-spec.md` 为准，不因本文件较长而要求逐节执行验证。
+
 ## 认证
 
 所有请求需要 Bearer Token：
@@ -123,15 +125,7 @@ Content-Type: application/json
 先过滤出 `status=active` 的候选；没有 active 时立即停止，不部署、不回调、不写配置、不建任务。
 只在 active 子集中选择最佳证书：
 
-```go
-// 进入排序前已过滤 status=active；优先级：域名精确匹配、通配符匹配、过期时间最晚
-sort.Slice(certs, func(i, j int) bool {
-    // 优先精确匹配（不含通配符）
-    // 其次是通配符匹配
-    // 按过期时间排序（晚的优先）
-    return certs[i].ExpiresAt > certs[j].ExpiresAt
-})
-```
+优先域名精确匹配，其次通配符匹配，同类中按到期时间选择；不能只按到期时间排序而忽略匹配优先级。
 
 ### 通配符匹配规则
 
@@ -261,9 +255,9 @@ active 已签发但无可用配对私钥时，不复用旧 CSR 意图：先清�
 
 **重要**：重新签发（reissue）不会改变 OrderID，只有续费（renew）才会生成新 OrderID。
 
-本地存储目录结构：
+本地存储由 `cert/keystore.go` 通过 `config.GetDataDir()` 定位；pending 私钥/CSR 另存于数据目录下的 `pending-keys/<cert-name>/`。订单目录结构：
 ```
-{程序目录}/data/orders/
+{程序目录}/sslctlw/orders/
   ├── 12345/                    # 订单 ID
   │   ├── private.key           # 私钥（本地生成）
   │   ├── cert.pem              # 证书（从 API 获取）

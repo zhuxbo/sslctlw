@@ -1,5 +1,7 @@
 # Windigo UI 规范
 
+按改动读取：控件/事件查“控件创建”，布局查“动态布局”，后台/模态查“防 UI 卡死”和生命周期章节；单纯文案不启动线程与布局全套验证。示例用于说明局部 API，实际代码沿用当前 `ui/` 的错误处理、recover 和生命周期保护。
+
 ## 依赖
 
 ```go
@@ -209,24 +211,7 @@ func ShowDialog(owner ui.Parent) {
 
 如果主窗口有后台任务的 `onUpdate` 回调，在显示模态对话框前必须禁用，否则会导致对话框卡死：
 
-```go
-btn.On().BnClicked(func() {
-    // 1. 禁用后台任务回调
-    app.bgTask.SetOnUpdate(nil)
-
-    // 2. 显示模态对话框
-    ShowDialog(app.mainWnd, func() {
-        app.doLoadDataAsync(nil)
-    })
-
-    // 3. 恢复回调
-    app.bgTask.SetOnUpdate(func() {
-        app.mainWnd.UiThread(func() {
-            app.updateTaskStatus()
-        })
-    })
-})
-```
+复用 `withPausedTaskUpdate`，用 `defer` 恢复回调；实现示例只维护在下文“SetOnUpdate(nil) 必须使用 defer”，不要手工在对话框返回后恢复。
 
 ## 动态布局
 
@@ -240,8 +225,8 @@ app.mainWnd.On().WmSize(func(p ui.WmSize) {
     cx, cy := int(p.ClientAreaSize().Cx), int(p.ClientAreaSize().Cy)
 
     // 调整控件
-    app.siteList.Hwnd().SetWindowPos(0, 10, 50, cx-20, cy-200, co.SWP_NOZORDER)
-    app.btnXxx.Hwnd().SetWindowPos(0, 10, cy-180, 100, 28, co.SWP_NOZORDER)
+    app.siteList.Hwnd().SetWindowPos(0, ui.DpiX(10), ui.DpiY(50), cx-ui.DpiX(20), cy-ui.DpiY(200), co.SWP_NOZORDER)
+    app.btnXxx.Hwnd().SetWindowPos(0, ui.DpiX(10), cy-ui.DpiY(180), ui.DpiX(100), ui.DpiY(28), co.SWP_NOZORDER)
 })
 ```
 
@@ -276,7 +261,7 @@ btn.On().BnClicked(func() {
         // 3. 准备好所有数据
         items := prepareListItems(sites, certs)
 
-        // 4. UiThread 只更新 UI（不调用任何函数）
+        // 4. UiThread 只更新 UI（不执行耗时工作）
         dlg.UiThread(func() {
             btn.Hwnd().EnableWindow(true)
             for _, item := range items {
@@ -377,45 +362,6 @@ GUI 模式时在运行时调用 `util.HideConsole()` 隐藏并释放控制台：
 - 代价：GUI 模式启动瞬间可能闪现控制台窗口。
 - 后果：GUI 模式无控制台，库层禁止直接 `fmt.Print`，改用 `log.Printf` / `ProgressFunc`（见 `skills/go-dev.md`）。
 
-### ComboBox CbnSelChange 事件时序问题（重要）
-
-**问题**: 在可编辑 ComboBox（`CBS_DROPDOWN`）的 `CbnSelChange` 事件中，`cmb.Text()` 返回的可能是**旧值**，因为编辑框文本尚未更新。
-
-**症状**: 第一次选择某个选项时，关联组件显示不正确；再次选择同一选项才正常。
-
-**原因**: Windows ComboBox 在 `CBN_SELCHANGE` 消息触发时，选中索引已更新，但编辑框文本可能延迟更新。
-
-**错误示例**:
-```go
-// ❌ 错误：CbnSelChange 中使用 Text()
-cmbDomain.On().CbnSelChange(func() {
-    domain := cmbDomain.Text()  // 可能是旧值！
-    updateList(domain)
-})
-```
-
-**正确方案**: 使用索引从原始数据获取值：
-```go
-// ✓ 正确：通过索引获取
-domainList := []string{"a.com", "b.com", "c.com"}
-
-cmbDomain.On().CbnSelChange(func() {
-    idx := cmbDomain.Items.Selected()
-    if idx >= 0 && idx < len(domainList) {
-        domain := domainList[idx]  // 从原始列表获取
-        updateList(domain)
-    }
-})
-
-// CbnEditChange 事件中可以用 Text()（用户手动编辑时）
-cmbDomain.On().CbnEditChange(func() {
-    domain := cmbDomain.Text()  // 这里是正确的
-    updateList(domain)
-})
-```
-
-**适用场景**: 仅影响 `CBS_DROPDOWN`（可编辑）样式。`CBS_DROPDOWNLIST`（只读）通常不受影响，但建议也使用索引方式。
-
 ### Dialog 级别 Context 取消模式
 
 对话框中启动的 goroutine 必须在对话框关闭时终止，否则会在关闭后继续运行（访问已释放的 UI 控件导致崩溃）。
@@ -436,6 +382,7 @@ func ShowDialog(owner ui.Parent) {
             return // 对话框已关闭，不再更新 UI
         }
         dlg.UiThread(func() {
+            if dlgCtx.Err() != nil { return } // 排队期间也可能关闭
             // 更新 UI...
         })
     }()
